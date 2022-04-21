@@ -1,0 +1,27 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP R_Divider_Network04_Split
+D 8 resistor divider network, star topology, bussed resistors, split
+K R network star-topology
+F https://www.bourns.com/docs/Product-Datasheets/4600x.pdf
+$ENDCMP
+#
+$CMP R_Divider_Network06_Split
+D 12 resistor divider network, star topology, bussed resistors, split
+K R network star-topology
+F https://www.bourns.com/docs/Product-Datasheets/4600x.pdf
+$ENDCMP
+#
+$CMP R_Divider_Network08_Split
+D 16 resistor divider network, star topology, bussed resistors, split
+K R network star-topology
+F https://www.bourns.com/docs/Product-Datasheets/4600x.pdf
+$ENDCMP
+#
+$CMP R_Network_Dividers_x08_SIP
+D 8 voltage divider network, dual terminator, SIP package
+K R network divider topology
+F http://www.vishay.com/docs/31509/csc.pdf
+$ENDCMP
+#
+#End Doc Library
