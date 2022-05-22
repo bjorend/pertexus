@@ -1,4 +1,4 @@
-### Module positions - created on Sat May 21 22:34:25 2022 ###
+### Module positions - created on Sun May 22 11:48:09 2022 ###
 ### Printed by Pcbnew version (6.0.4)
 ## Unit = mm, Angle = deg.
 ## Side : top
@@ -16,7 +16,7 @@ JP1       Jumper_3_Open          PinHeader_1x03_P2.54mm_Vertical                
 RN1       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         170.1750   -58.4200  180.0000  top
 RN2       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         143.5050   -58.4200  180.0000  top
 RN3       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         116.8400   -58.4200  180.0000  top
-RN4       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         149.8600  -114.9350    0.0000  top
+RN4       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         149.8650  -113.6650    0.0000  top
 RN5       R1=220Ω,_R2=330Ω     R_Array_SIP10                                          93.3450  -125.0950    0.0000  top
 RN6       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         121.9200  -125.0950    0.0000  top
 RN7       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         149.8600  -125.0950    0.0000  top

@@ -1,11 +1,11 @@
-## Footprint report - date Sat May 21 22:34:34 2022
+## Footprint report - date Sun May 22 11:48:20 2022
 ## Created by Pcbnew version (6.0.4)
 ## Unit = inches, Angle = deg.
 
 $BeginDESCRIPTION
 
 $BOARD
-upper_left_corner  3.355217  0.993602
+upper_left_corner  3.021175  0.993602
 lower_right_corner  7.602972  5.477953
 $EndBOARD
 
@@ -1620,6 +1620,58 @@ shape_offset  0.000000  0.000000
 $EndPAD
 $EndMODULE  R8
 
+$MODULE REF**
+footprint MountingHole:MountingHole_4.3mm_M4_ISO14580
+attribut virtual
+position  6.725000  4.700000  orientation 0.00
+layer front
+$PAD ""
+Shape Circle Layer both
+position  0.000000  0.000000  size  0.169291  0.169291  orientation 0.00
+drill  0.169291
+shape_offset  0.000000  0.000000
+$EndPAD
+$EndMODULE  REF**
+
+$MODULE REF**
+footprint MountingHole:MountingHole_4.3mm_M4_ISO14580
+attribut virtual
+position  3.550000  4.700000  orientation 0.00
+layer front
+$PAD ""
+Shape Circle Layer both
+position  0.000000  0.000000  size  0.169291  0.169291  orientation 0.00
+drill  0.169291
+shape_offset  0.000000  0.000000
+$EndPAD
+$EndMODULE  REF**
+
+$MODULE REF**
+footprint MountingHole:MountingHole_4.3mm_M4_ISO14580
+attribut virtual
+position  6.725000  2.075000  orientation 0.00
+layer front
+$PAD ""
+Shape Circle Layer both
+position  0.000000  0.000000  size  0.169291  0.169291  orientation 0.00
+drill  0.169291
+shape_offset  0.000000  0.000000
+$EndPAD
+$EndMODULE  REF**
+
+$MODULE REF**
+footprint MountingHole:MountingHole_4.3mm_M4_ISO14580
+attribut virtual
+position  3.575000  2.075000  orientation 0.00
+layer front
+$PAD ""
+Shape Circle Layer both
+position  0.000000  0.000000  size  0.169291  0.169291  orientation 0.00
+drill  0.169291
+shape_offset  0.000000  0.000000
+$EndPAD
+$EndMODULE  REF**
+
 $MODULE RN1
 footprint pertec_arduino_adapter:R_Array_SIP10
 attribut none
@@ -1824,7 +1876,7 @@ $EndMODULE  RN3
 $MODULE RN4
 footprint pertec_arduino_adapter:R_Array_SIP10
 attribut none
-position  5.900000  4.525000  orientation 0.00
+position  5.900197  4.475000  orientation 0.00
 layer front
 $PAD "1"
 Shape Rect Layer both
