@@ -1,0 +1,21 @@
+%TF.GenerationSoftware,KiCad,Pcbnew,(6.0.4)*%
+%TF.CreationDate,2022-05-21T22:33:24-04:00*%
+%TF.ProjectId,pertec_arduino_adapter,70657274-6563-45f6-9172-6475696e6f5f,A*%
+%TF.SameCoordinates,Original*%
+%TF.FileFunction,Paste,Top*%
+%TF.FilePolarity,Positive*%
+%FSLAX46Y46*%
+G04 Gerber Fmt 4.6, Leading zero omitted, Abs format (unit mm)*
+G04 Created by KiCad (PCBNEW (6.0.4)) date 2022-05-21 22:33:24*
+%MOMM*%
+%LPD*%
+G01*
+G04 APERTURE LIST*
+%ADD10R,2.540000X3.510000*%
+G04 APERTURE END LIST*
+D10*
+%TO.C,BT1*%
+X144070000Y-74930000D03*
+X173430000Y-74930000D03*
+%TD*%
+M02*

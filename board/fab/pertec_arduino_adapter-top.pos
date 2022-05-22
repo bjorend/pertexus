@@ -1,0 +1,24 @@
+### Module positions - created on Sat May 21 22:34:25 2022 ###
+### Printed by Pcbnew version (6.0.4)
+## Unit = mm, Angle = deg.
+## Side : top
+# Ref     Val                    Package                                                   PosX       PosY       Rot  Side
+BT1       CR2032                 BatteryHolder_Keystone_1058_1x2032                    158.7500   -74.9300    0.0000  top
+C1        0.1_μF                C_Rect_L4.0mm_W2.5mm_P2.50mm                          109.8550   -62.2300  180.0000  top
+J1        Pertec_J1              IDC-Header_2x25_P2.54mm_Latch_Vertical                100.3250  -133.9850   90.0000  top
+J2        Pertec_J2              IDC-Header_2x25_P2.54mm_Latch_Vertical                162.5650   -42.4275  -90.0000  top
+J3        Teensy_Ethernet        PinSocket_2x03_P2.00mm_Vertical_Mirror_Teensy4.1_J3   103.1400   -90.0800    0.0000  top
+J4        Teensy_Right           PinSocket_1x24_P2.54mm_Vertical_Teensy4.1_J4           90.1700   -87.6300   90.0000  top
+J5        Teensy_Left            PinSocket_1x24_P2.54mm_Vertical_Teensy4.1_J5           90.1800  -102.8450   90.0000  top
+J6        Teensy_Cross           PinSocket_1x05_P2.54mm_Vertical_Teensy4.1_J6          135.9150   -90.2000    0.0000  top
+J7        RJ45_Cetus_J1B1211CCD  RJ45_Cetus_J1B1211CCD_Horizontal                      104.1400   -67.9450  -90.0000  top
+JP1       Jumper_3_Open          PinHeader_1x03_P2.54mm_Vertical                       115.5700  -121.5458  -90.0000  top
+RN1       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         170.1750   -58.4200  180.0000  top
+RN2       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         143.5050   -58.4200  180.0000  top
+RN3       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         116.8400   -58.4200  180.0000  top
+RN4       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         149.8600  -114.9350    0.0000  top
+RN5       R1=220Ω,_R2=330Ω     R_Array_SIP10                                          93.3450  -125.0950    0.0000  top
+RN6       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         121.9200  -125.0950    0.0000  top
+RN7       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         149.8600  -125.0950    0.0000  top
+RN8       R1=220Ω,_R2=330Ω     R_Array_SIP10                                         120.6500   -52.0700  180.0000  top
+## End
