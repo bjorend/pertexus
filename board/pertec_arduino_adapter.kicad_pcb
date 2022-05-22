@@ -3280,7 +3280,6 @@
   (gr_line (start 114.3 106.426) (end 114.3 117.856) (layer "F.SilkS") (width 0.15) (tstamp 301dfc21-d9c2-4504-8e3e-cc7d715c9bfd))
   (gr_line (start 123.19 106.426) (end 123.19 117.856) (layer "F.SilkS") (width 0.15) (tstamp 37adb9fd-59a5-4ccc-98a7-a012a1a3b450))
   (gr_line (start 90.17 106.426) (end 141.605 106.426) (layer "F.SilkS") (width 0.15) (tstamp 3981acee-228b-4553-88d9-2bd04ea83e9a))
-  (gr_line (start 0 -5.715) (end 0 5.715) (layer "F.SilkS") (width 0.15) (tstamp 48fda016-5e83-4de4-8b0a-21992d7cd2b5))
   (gr_line (start 113.665 106.426) (end 113.665 117.856) (layer "F.SilkS") (width 0.15) (tstamp 5099ecf8-9bab-45b0-8179-4c5063589fd9))
   (gr_line (start 90.17 117.856) (end 141.605 117.856) (layer "F.SilkS") (width 0.15) (tstamp 7d279aef-5277-4a67-b3c3-ffc510178c55))
   (gr_line (start 90.17 108.331) (end 141.605 108.331) (layer "F.SilkS") (width 0.15) (tstamp 7ef178b7-d5b3-431c-8d3c-9c7a46dcad2f))
