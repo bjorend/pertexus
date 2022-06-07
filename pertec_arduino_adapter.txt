@@ -1,0 +1,440 @@
+                        Pertec Arduino Adapter
+                             Bjoren Davis
+                             May 7, 2022
+
+ * References:
+ *  [1] Technical Service Manual for Qualstar Phase Encoded
+ *      Streaming Tape Transports
+ *      P/N 500150 Rev. B 5/14/90
+ *      Qualstar Corporation, 9621 Irondale Avenue, Chatsworth, CA  91311
+ *      https://bitsavers.org/pdf/qualstar/500150B_1052serviceMan.pdf
+ *  [2] Pertec 9-Track Tape Interface
+ *      Information courtesty [sic] of John Wilson
+ *      https://sydex.com/pertec.html
+ *  [3] i.MX RT1060 Processor Reference Manual
+ *      Document Number: IMXRT1060RM
+ *      Rev. 3, 07/2021
+ *      NXP Semiconductors
+ *      https://www.pjrc.com/teensy/IMXRT1060RM_rev3.pdf
+ *  [4] SIMH Magtape Representation and Handling
+ *      Bob Supnik, 30 Aug 06
+ *      http://simh.trailing-edge.com/docs/simh_magtape.pdf
+ *  [5] Schematic for Teensy 4.1
+ *      https://www.pjrc.com/teensy/schematic41.png
+ *  [6] Pinouts for Teensy 4.1
+ *      Front: https://www.pjrc.com/teensy/card11a_rev4_web.pdf
+ *      Back: https://www.pjrc.com/teensy/card11b_rev4_web.pdf
+ *  [7] PCA9535; PCA9535C
+ *      16-bit I2C-bus and SMBus, low power I/O port with interrupt
+ *      Product data sheet
+ *      Rev. 6 - 7 November 2017
+ *      Document identifier: PCA9535_PCA9535C
+ *      NXP Semiconductors
+ *      https://www.nxp.com/docs/en/data-sheet/PCA9535_PCA9535C.pdf
+
+May 7, 2022
+-----------
+
+I've been trying to build a Pertec tape controller adapter for some
+time now.
+
+I started out building a hand-wired adapter that uses an Arduino Mega
+R3 2560 to connect directly to the 2 x 50-pin Pertec connectors.
+
+It works alright.  The problem is that the CPU is just too slow and
+the SD card access can't quite keep up with the data rate from my
+Qualstar (about 80 kBps) with some record-sizes.  It also can't keep
+up with the interrupt rate if I wanted to both write and
+simultaneously read back.  Finally, it has vastly too little buffering
+(8 KiB, of which I can only use 4 KiB because I need the ring buffer
+arithmetic to be fast).
+
+In addition, I'd like the following additional features:
+    + read-after-write data validation for those drives that support
+      it.
+    + support for drives moving up to 150 ips and 6250 bps (that's
+      actually 9042 bpi giving about 1.4 MBps)
+    + ability to handle differing directions of non-standard signals
+      (ISGL/SPCMD1)
+    + ability to buffer at least 2 full records at maximum of 65536
+      bytes (so a minimum of at least 128 KB of RAM)
+    + ability to do high speed reads/writes to SD card
+    + ability to implement a USB UASP (USB Attached SCSI Protocol)
+      SCSI-type tape device using SCSI-2 SSC
+    + ability to implement an iSCSI-type tape device over Ethernet
+      using SCSI-2 SSC
+
+So let's look at some possible platforms:
+    + Arduino Mega R3 2560
+        + $42.40/each, currently available
+        + 16 MHz AVR 8-bit CPU
+        + 8 KiB RAM, 256 KiB flash (program text size is usually
+          limited to 64 KiB)
+        + 5V native I/O
+        + USB is implemented via a serial link to another chip.  This
+          rules out the UASP link
+        + only 8 KiB of RAM rules out buffering full records
+        + SD interface is SPI-only (no SDIO)
+        + the CPU is too slow to handle reading a tape and writing to
+          the SD card
+        + enough GPIOs to connect to everything on the Pertec
+          interface
+        + downsides:
+            + slow
+            + very little RAM
+            + no native USB
+            + no Ethernet?
+            + 3.3V needs level shifters
+            + no realtime clock? (file create dates are garbage)
+            + SD slot is not on board -- need extra board
+    + Adafruit Metro M4 Grand Central
+        + $39.95/each, currently unavailable
+        + 120 MHz ARM Cortex M4
+        + 256 KiB RAM, 1 MiB flash
+        + 3.3V native I/O -- needs level shifters
+        + enough GPIOs to connect to everything on the Pertec
+          interface
+        + SD interface is SPI-only (no SDIO)
+        + CPU is much more powerful than the Arduino Mega R3 2560
+        + native USB
+        + downsides:
+            + unavailable
+            + no Ethernet?
+            + no SDIO
+            + 3.3V needs level shifters
+            + no realtime clock? (file create dates are garbage)
+    + pjrc Teensy 4.1
+        + $26.85/each (no pins), available
+        + $30.85/each (with pins), not available
+        + 600 MHz ARM Cortex M7
+        + 1 MiB RAM, 7.9 MiB flash
+        + possibility for QSPI-based RAM
+        + 3.3V only -- needs level shifters
+        + native Ethernet with PHY on board
+        + native USB
+        + downsides:
+            + 3.3V requires level shifters
+            + insufficient GPIOs to handle entire interface
+
+So I chose the Teensy 4.1.  The I/O mapping is really complicated.
+There are some components (the "cross bar") that I really don't
+understand.
+
+But it appears each "pad" (pin) has between 1 and up to 8 different
+possible functions.
+
+I want to design a daughterboard with the following:
+    + a 16-port I2C GPIO "expander" (and possibly level shifter)
+    + level shifters
+    + "terminators" (SIP sockets for 220/330 terminators)
+    + Ethernet RJ45
+    + CR2032 clip to provide power to keep
+
+Another thing I wanted to do was determine what devices are already in
+use on the board.  The CPU is an MIMXRT1062DVJ6B.
+
+On-board devices in use:
+    + USB: USB_OTG1
+    + Boot: SRC_BOOT_MODE[0], JTAG (SRC_BOOT_MODE[1] pulled to ground)
+    + Main flash: FLEXSPI_A
+    + SD card: USDHC1
+    + Ethernet: ENET
+    + PSRAM/FLASH (unpopulated): FLEXSPI2_A (PSRAM=SS0_B, FLASH=SS1_B)
+
+Next I need to start assigning I/Os.  First I need to find:
+    + an I2C connection for my port expander
+    + a contiguous set of bits for my read data
+    + a contiguous set of bits for my write data
+
+I put the "Mux" table into my spreadsheet to ease in my analysis.
+
+If I don't consider using FLEXIO for my I2C, and I want to reserve 2
+8-bit contiguous blocks of bits for read and write data, I am left
+with only this choice:
+    + LPI2C4_SCL = GPIO_AD_B0_12 (J5:16)
+    + LPI2C4_SDA = GPIO_AD_B0_13 (J5:17)
+That leaves GPIO_AD_B1_00..GPIO_AD_B1_15 available for use as the read
+and write data.  These are all on pins on J4 and J5.  They are all
+contiguous GPIOs and they are FLEXIO3_D00..FLEXIO3_D15, so I *might*
+be able to construct a data movement machine with the FLEXIO block
+(though I doubt I'll need to).
+
+
+May 8, 2022
+-----------
+
+I'm using the Adafruit "GPIO Bonnet"
+(https://www.adafruit.com/product/4132) as a basis for a
+level-translating expander design.  I won't use the same chip
+(MCP23017ML) because it's not currently available.  But there are
+other equivalent chips available.
+
+
+May 11, 2022
+------------
+
+I'm beginning to make chip/pin assignments.
+
+May 18, 2022
+------------
+
+I've *finally* got a completed schematic, and I've started the layout.  Ugh.
+
+May 19, 2022
+------------
+
+I want to generalize the board to act either as a controller or a
+peripheral.
+
+I have 3 available 3.3V logic signals to use.  Here are the modes:
+
+    + controller active.  We're listening on inputs and driving outputs.
+    + controller inactive.  We don't really care about inputs because
+      we're the controller.  We'd only assume this mode to let another
+      controller take over.
+    + analyzer.  All lines are inputs.
+    + peripheral inactive.  We're listening on inputs but not driving
+      outputs.
+    + peripheral active.  We've been selected by a controller and
+      we're responding.  We're listening on inputs and driving outputs.
+
+We'll group the Pertec signals as
+    + Group A: inputs to controller, outputs from peripheral.
+        IFBY, IR2, IR3, IRP, IR0, IR1, ILDP, IR4, IR7, IR6, IHER,
+        IFMK, IDENT, IR5, IEOT, INRZ, IRDY, IRWD, IFPT, IRSTR, IWSTR,
+        IDBY, ISPEED, ICER, IONL
+    + Group B: outputs from controller, inputs to peripheral.
+        ILWD, IW4, IGO, IW0, IW1, ISGL, ILOL, IREV, IREW, IWP, IW7,
+        IW3, IW6, IW2, IW5, IWRT, IRTH2, IEDIT, IERASE, IWFM, IRTH1,
+        ITAD0, IFEN, IOFL, ITAD1, IFAD, IDEN
+
+    Mode                    DIRA  OEA   DIRB    Group A         Group B
+    controller active       L     L     H       input           output          
+    controller inactive     L     L     L       don't care      don't care      
+    analyzer                L     L     L       input           input           
+    peripheral inactive     H     H     L       don't care      input           
+    peripheral active       H     L     L       output          input           
+
+Group B signals always have OE enabled because the transition from
+undriven to driven (input to output) happens only rarely -- it's not
+a change that happens during normal operation.
+
+For a peripheral, however, enabling/disabling the output of its output
+signals (group A signals) happens during operation.
+
+Actually, Group A should be further subdivided into A0 and A1
+    + Group A0 (OE = nSTATENA):
+        IRWD, IFPT, ISPEED, IONL
+    + Group A1 (OE = nONLSEL):
+        IFBY, IR2, IR3, IRP, IR0, IR1, ILDP, IR4, IR7, IR6, IHER,
+        IFMK, IDENT, IR5, IEOT, INRZ, IRDY, IRSTR, IWSTR,
+        IDBY, ICER
+        
+Happily all of Group A0 lines are on the fully-controllable PCA9353DBR
+
+May 22, 2022
+------------
+
+Last night I taped out bdb004 "Pertexus" Revision 1.  I ordered 3
+boards from OSH park and a bottom SMD stencil from OSH stencils.  I
+also put together and ordered 3 kits worth of parts from Digikey.
+
+Today I realized I didn't put any mounting holes into the thing.
+
+This morning I drew up Revision A1 with holes for M4 screws.  I used
+the "ISO 14580" version of the hole -- a cap-head screw -- because it
+has a smaller keepout area.
+
+I didn't move anything except RN4 and some traces near RN4 and near
+pin 1 of RN1.
+
+This means that I don't have to reorder the stencil, hopefully.
+
+
+June 4, 2022
+------------
+
+Yesterday I got my PCBs and I built one up.
+
+Some issues/things to work on with the PCB:
+    + The 50-pin latched connectors have levers that are a little too
+      short for the IDC female headers I have on my cable.
+    + It would be easier to place the resistors/capacitors if they
+      were all aligned the same way.
+    + I should have grouped the I/Os on the PCA9535 with all group A
+      signals on one port and all group B signals on the other.  By
+      doing that I could simplify the interrupt handling to only read
+      one of the two ports.
+    + I forgot to put a serial number location on the board.
+    + It would have been nice to add some shunts so I could measure
+      the current consumption (the board is getting quite warm).
+    + ILWD is attached to GPIO_B0_03, which is also attached to an LED
+      on the Teensy 4.1 board.  That was probably not a good choice.
+
+I tested the Ethernet using an example sketch
+(File->Examples->Examples for Teensy
+4.1->NativeEthernet->TelnetClient) and it seems to be working
+perfectly.
+
+I tested the SD card and it works correctly using another example
+sketch (File->Examples->Examples for Teensy
+4.1->SD->listfiles).
+
+I tested the RTC clock and it works but it loses its settings when the
+power is removed, even though I have a CR2032 battery in the clip (File->Examples->Examples for Teensy
+4.1->Time->TimeRTCSet).
+
+
+June 6, 2022
+------------
+
+I got an initial sketch built which toggles all of the GPIOs.
+Everything works!
+
+Sadly, the board gets quite warm and the voltages I see are not
+terribly good.
+
+I removed the termination and the voltages look terrific.
+
+My calculation is:
+
+Current consumption with all group A signals floating (termination
+only on inputs) and JP1 with no jumper:
+    = 24 * (5V/(220Ohm + 330Ohm) = 218 mA
+
+So the big question is: why did the Arduino Mega 2560 not have this
+problem?
+
+I connected a USB current monitor and found that the Arduino Mega 2560
+stayed pretty much below 200 mA, whereas the Teensy 4.1 goes way above
+that.
+
+I put in the 'testread' command and tried it out.  As soon as I attach
+it to the tape drive I see weird things: when the Teensy 4.1 is
+completely unpowered the LED lights up; there is parasitic power flow
+back through the level shifters/port expander.  Yuck.
+
+But when I connect to the "serial" port I get the "PERTEXUS>" prompt
+and the device immediately detaches.
+
+Current consumption
+    Teensy 4.1, free, running command loop          100 mA
+    Teensy 4.1, attached to bdb004 with no
+         terminators, no connection to tape drive   about 250 mA
+                                                    (peaking at 270
+                                                    mA)
+    Teensy 4.1, attached to bdb004 with all GPIOs
+         as inputs (gpio -forcein)                  250 mA
+    Teensy 4.1, attached to bdb004 with all GPIOs
+         as outputs (gpio -forceout, no terminator,
+         no tape drive)                             110 mA
+    Teensy 4.1, attached to bdb004 with
+        input terminators                           480 mA
+    Teensy 4.1, attached to bdb004 with
+        input terminators, all GPIOs outputs
+        (gpio -forceout)                            640 mA
+    Teensy 4.1, attached to bdb004 with
+        input terminators, attached to
+        unpowered tape drive                        420 mA
+    Teensy 4.1, attached to bdb004 with
+        input terminators, attached to
+        powered tape drive                          410 mA
+        but the USB connection disconnects
+        
+I'm wondering if the inputs are flapping and that's why I'm burning
+power.  Ugh.  I should have put weak pullups on all of the signals.
+
+Let's see: running the input pullups, will take 32 *
+5V/(220Ohm+330Ohm) = 290 mA.  Let's also assume that the level
+shifters have some non-infinite input resistance, so that could
+account for the additional current.
+
+Switching everything to outputs drives burns 8*5V/(220Ohm + 330Ohm) +
+24 * 5V/(330Ohm) = 436 mA
+
+When I power up the tape drive I see the USB current consumption spike
+well above 1 A.  It's definitely pulling the voltage down.
+
+If I reset the firmware I am able to reconnect but as soon as I get
+the prompt it pukes.
+
+Maybe there's a way to sequence the power of up the devices to avoid
+the current rush.
+
+Interesting -- I removed the call to gpios_init() from setup() and I
+can turn the drive's power on without problem.
+
+
+
+June 7, 2022
+------------
+
+I've narrowed the fault down to the point at which we turn on the
+"GROUPB0" traditional GPIO outputs:
+
+        /* Initialize outputs */
+        for (idx = 0; idx < NELEM(gpinfos); idx++) {
+            if (gpinfos[idx].group == GROUPB0) {
+                digitalWrite(gpinfos[idx].pinnum, HIGH);
+                pinMode(gpinfos[idx].pinnum, OUTPUT);
+            }
+        }
+
+If I ifdef out that section of code in gpios_init() it runs to
+completion without causing the part to reset.
+
+I tried putting in a full second of delay between setting DIRA, DIRB,
+and OEA and enabling the outputs but that still doesn't do it.
+
+Very strange.  I set all the outputs to inputs and enabled the weak
+pullups, which I assume will drive the level shifters inputs high, but
+that doesn't cause an overdraw.  It's as I initialize the Group B0
+outputs (and set them either high or low -- it doesn't really matter)
+that the current consumption crawls way up.  It's almost as if the
+current being drawn isn't at the level shifter but actually at the
+CPU.  Do I have the DIR or OE sense backwards?
+
+---
+
+I figured it out.  Strangely, you can't do this:
+
+    digitalWrite(GP_PINNUM(GP_DIRA), LOW);      /* "B to A" (inputs) */
+    digitalWrite(GP_PINNUM(GP_DIRB), HIGH);     /* "A to B" (outputs) */
+    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
+    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
+    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
+    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
+
+You must do this:
+
+    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
+    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
+    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
+    digitalWrite(GP_PINNUM(GP_DIRA), LOW);      /* "B to A" (inputs) */
+    digitalWrite(GP_PINNUM(GP_DIRB), HIGH);     /* "A to B" (outputs) */
+    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
+
+What was happening was that I was configuring the group B level
+shifters as outputs but, because I had the above order backwards, they
+were staying configured as inputs.  This meant that the level shifter
+was driving the signal and then I came along and started driving the
+signal, too.  This burned up much power and caused the thing to reset.
+
+The problems I'm having now are:
+    + the GPIO numbering doesn't seem correct (e.g., IGO, which is
+      Arduino pin 6, appears to be in the GPIO7 register set, not
+      GPIO2 as I was expecting)
+
+      I see what's going on:  p. 945 of ref[3]:
+      "Regular GPIO and high speed GPIO are paired (GPIO1 and GPIO6
+      share the same pins, GPIO2 and GPIO7 share, etc). The
+      IOMUXC_GPR_GPR26-29 registers are used to determine if the
+      regular or high-speed GPIO module is used for the GPIO pins on a
+      given port"
+
+      So I guess we're in "high speed" mode.
+
+    + The lines all go low on initialization.  This causes the drive
+      to unload, which is really annoying.
+
+
