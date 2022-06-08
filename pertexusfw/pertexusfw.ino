@@ -43,10 +43,12 @@
  * Bjoren Davis, June 4, 2022
  */
 
+#define OPT_INTCOUNTS
 
 #include <Wire.h> //include Wire.h library
 #include <SD.h>
-#if defined(PERTEXUSFW_ETHERNET)
+#include <TimeLib.h>
+#if defined(OPT_ETHERNET)
 #   include <NativeEthernet.h>
 #endif
 #include "basetypes.h"
@@ -315,12 +317,15 @@
  */
 #define GP_READ(pstatep, gp)                                            \
     ({                                                                  \
+        uint32_t        _val;                                           \
         if (((_GP_GROUP gp) & 1) != 0) {                                \
-            _GP_PORTEXP_READ((pstatep), _GP_SETNUM gp, _GP_BITNUM gp);  \
+            _val = _GP_PORTEXP_READ((pstatep),                          \
+                                    _GP_SETNUM gp, _GP_BITNUM gp);      \
         }                                                               \
         else {                                                          \
-            _GP_TRADGPIO_READ(_GP_SETNUM gp, _GP_BITNUM gp);            \
+            _val = _GP_TRADGPIO_READ(_GP_SETNUM gp, _GP_BITNUM gp);     \
         }                                                               \
+        _val;                                                           \
     })
 
 /*
@@ -597,6 +602,8 @@ typedef struct _pertexus_state {
     unsigned int    recsdone;
     tape_rec_t     taperecs[TAPENRECS];
     uint8_t         buf[TAPEBUFSIZ];
+    uint8_t         wrnextbyte;
+    bool_t          wrlwd;
     cmdif_t         cmdif;
     gpinreg_t       gpinregs[GP_MAXINREGS];
     unsigned int    ninregs;
@@ -605,7 +612,6 @@ typedef struct _pertexus_state {
     bool_t          sdcardinit;
     TwoWire        *portexp;
     SDClass         *sdp;
-    File               root;
 } pertexus_state_t;
 
 typedef enum {
@@ -620,24 +626,45 @@ typedef enum {
 /* Static prototypes */
 
 static void gpios_init(pertexus_state_t *pstatep);
+static inline void writerecstart(pertexus_state_t *pstatep);
+static inline void readrecstart(pertexus_state_t *pstatep);
+static inline void readrecfinish(pertexus_state_t *pstatep);
+static void interrupts_init(pertexus_state_t *pstatep);
+static void interrupts_set(pertexus_state_t *pstatep,
+                           interrupt_config_t iconfig);
 static unsigned int portexp_read(pertexus_state_t *pstatep, int bytenum);
 static void portexp_write(pertexus_state_t *pstatep, unsigned int bytenum,
                           unsigned int val);
 static void portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
                              unsigned int val);
+static void debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp);
 static bool_t sdcard_init(pertexus_state_t *pstatep, Stream *streamp);
 static void printDirectory(File dir, int numSpaces, Stream *outstreamp);
 static void printSpaces(int num, Stream *outstreamp);
-static void printTime(const DateTimeFields tm, Stream *outstreamp);
+static void printTime(const DateTimeFields tm, Stream *outstreamp,
+                      bool_t printsecs);
 static void printpad(Stream *streamp, const char *strp, int padlen);
 static void hexprint(Stream *outstream, unsigned int val, int ndigits);
 static void hexprint32(Stream *outstream, uint32_t val, int ndigits);
 static void pcmd(pertexus_state_t *pstatep, uint32_t cmdbits);
 static bool_t bitwait(volatile uint32_t *regp, uint32_t bitmask,
                       bool_t bitset, Stream *instreamp, unsigned long timeout);
+static void ifreset(pertexus_state_t *pstatep);
+static void irstr_isr(void);
+static void iwstr_isr(void);
+static void idby_isr(void);
+static void ifmk_isr(void);
+static void icer_isr(void);
+static void iher_isr(void);
+static time_t getTeensy3Time(void);
 static void cmd_echo(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_date(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_reset(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_stats(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_fsf(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_write(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_read(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_nop(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_rewind(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_unload(cmdif_t *cmdifp, int argc, char **argv);
@@ -647,13 +674,6 @@ static void cmd_gpio(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_sd(cmdif_t *cmdifp, int argc, char **argv);
 
 #if 0
-static void cmd_stats(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_write(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_read(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_nop(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_unload(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_density(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_cmd(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_peek(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_poke(cmdif_t *cmdifp, int argc, char **argv);
@@ -667,12 +687,6 @@ static bool_t gp_inchanges(const uint8_t *valp,
 static void gp_inprint(Stream *outstreamp,
                        const uint8_t *valp, const uint8_t *prevp);
 static unsigned int atohex(const char *strp);
-static void debug_dumpstate(Stream *outstreamp);
-static inline void writerecstart(void);
-static inline void readrecstart(void);
-static inline void readrecfinish(void);
-static void interrupts_init(void);
-static void interrupts_set(interrupt_config_t iconfig);
 #endif
 
 
@@ -685,6 +699,9 @@ static void interrupts_set(interrupt_config_t iconfig);
  */
 static const char _cmd_echo_name[] = "echo";
 static const char _cmd_echo_brief[] = "echo back command arguments";
+
+static const char _cmd_date_name[] = "date";
+static const char _cmd_date_brief[] = "read or change the current date/time";
 
 static const char _cmd_fsf_name[] = "fsf";
 static const char _cmd_fsf_brief[] =
@@ -769,6 +786,7 @@ static const char _cmd_tapetest_brief[] = "destructively test the medium";
  */
 static const cmdifdisp_t cmdifdisp[] = {
     { &(_cmd_echo_name[0]), &(_cmd_echo_brief[0]), NULL, &cmd_echo },
+    { &(_cmd_date_name[0]), &(_cmd_date_brief[0]), NULL, &cmd_date },
     { &(_cmd_gpio_name[0]), &(_cmd_gpio_brief[0]), NULL, &cmd_gpio },
     { &(_cmd_sd_name[0]), &(_cmd_sd_brief[0]), NULL, &cmd_sd },
     { &(_cmd_reset_name[0]), &(_cmd_reset_brief[0]), NULL, &cmd_reset },
@@ -780,14 +798,14 @@ static const cmdifdisp_t cmdifdisp[] = {
     { &(_cmd_unload_name[0]), &(_cmd_unload_brief[0]), NULL, &cmd_unload },
     { &(_cmd_nop_name[0]), &(_cmd_nop_brief[0]), NULL, &cmd_nop },
     { &(_cmd_density_name[0]), &(_cmd_density_brief[0]), NULL, &cmd_density },
-#if 0
+    { &(_cmd_stats_name[0]), &(_cmd_stats_brief[0]), NULL, &cmd_stats },
     { &(_cmd_help_name[0]), &(_cmd_help_brief[0]),
       &(_cmd_help_full[0]), &cmdif_cmd_help },
-    { &(_cmd_stats_name[0]), &(_cmd_stats_brief[0]), NULL, &cmd_stats },
     { &(_cmd_testwrite_name[0]), &(_cmd_testwrite_brief[0]),
       NULL, &cmd_testwrite },
     { &(_cmd_write_name[0]), &(_cmd_write_brief[0]), NULL, &cmd_write },
     { &(_cmd_read_name[0]), &(_cmd_read_brief[0]), NULL, &cmd_read },
+#if 0
     { &(_cmd_peek_name[0]), &(_cmd_peek_brief[0]), NULL, &cmd_peek },
     { &(_cmd_poke_name[0]), &(_cmd_poke_brief[0]), NULL, &cmd_poke },
     { &(_cmd_cmd_name[0]), &(_cmd_cmd_brief[0]), NULL, &cmd_cmd },
@@ -888,13 +906,16 @@ static pertexus_state_t pertexus_state;
 /* -------------------------------------------------------------------------- */
 /* Global functions */
 
-#if defined(PERTEXUSFW_ETHERNET)
+#if defined(OPT_ETHERNET)
 byte ethernet_macaddr[] = { 0xde, 0xad, 0xbe, 0xef, 0xab, 0xba };
 #endif
 
 void
 setup(void)
 {
+    /* set the Time library to use Teensy 4.1's RTC to keep time */
+    setSyncProvider(&getTeensy3Time);
+
     pertexus_state.portexp = &Wire2;
     pertexus_state.sdp = &SD;
 
@@ -906,6 +927,7 @@ setup(void)
     pertexus_state.portexp->setClock(400000);
 
     gpios_init(&pertexus_state);
+    interrupts_init(&pertexus_state);
 
     Serial.begin(9600); // The baudrate of Serial monitor is set in 9600
     while (!Serial) {
@@ -918,17 +940,8 @@ setup(void)
     Serial.println("Starting up...");
     cmdif_init(&(pertexus_state.cmdif), &cmdifro, &Serial);
 
-    Serial.print(F("DIRA = "));
-    Serial.println(digitalRead(GP_PINNUM(GP_DIRA)));
-    
-    Serial.print(F("DIRB = "));
-    Serial.println(digitalRead(GP_PINNUM(GP_DIRB)));
-    
-    Serial.print(F("OEA  = "));
-    Serial.println(digitalRead(GP_PINNUM(GP_OEA)));
-    
 
-#if defined(PERTEXUSFW_ETHERNET)
+#if defined(OPT_ETHERNET)
     if (Ethernet.begin(ethernet_macaddr) == 0) {
         Serial.println("Failed to configure Ethernet using DHCP");
         if (Ethernet.hardwareStatus() == EthernetNoHardware) {
@@ -1118,6 +1131,226 @@ gpios_init(pertexus_state_t *pstatep)
     GP_WRITE(&pertexus_state, GP_IFEN, 0);
 }
 
+/*
+ * Initialize a tape record write, either a record with
+ *  data or a filemark.  This function
+ *  should be called when IDBY is deasserted.
+ * This function should be called either from
+ *  the interrupt context or if the state is IDLE
+ *  (so no interrupt would affect state anyway).
+ */
+static inline void
+writerecstart(pertexus_state_t *pstatep)
+{
+    uint8_t         rdrec;
+    tape_rec_t      *trp;
+
+    rdrec = pstatep->rdrec;
+    if (RING_ISEMPTY(pstatep->wrrec, rdrec, TAPENRECS)) {
+        /* No new records to get */
+        pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+    }
+    else {
+        trp = &(pstatep->taperecs[rdrec]);
+
+        if (trp->len == 0) {
+            /* We're writing a filemark */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_WFMWAIT;
+            pcmd(pstatep, PCMD_IWRT | PCMD_IWFM);
+        }
+        else if (RINGPTR_ISEMPTY(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ)) {
+            /* We don't have any data, so we must go to idle */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+        }
+        else {
+            pstatep->recbytes = trp->len;
+            /* We have at least one byte to send, so prime the pump */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_WRECSTART;
+            pcmd(pstatep, PCMD_IWRT);
+        }
+    }
+}
+
+/*
+ * (Possibly) start reading data, but only if
+ *  we have some space for both data and records.
+ *
+ * This function is called either from idle (when no
+ *  interrupts are coming because we're in PERTEXUS_STATE_OPSTATE_RPAUSED)
+ *  or from readrecfinish() from the IDBY interrupt handler
+ *  when we're in PERTEXUS_STATE_OPSTATE_RINREC or
+ *  PERTEXUS_STATE_OPSTATE_RFMSEEN.
+ */
+static inline void
+readrecstart(pertexus_state_t *pstatep)
+{
+    /*
+     * We have space and records available to receive into.
+     *  Start reading.
+     */
+    pstatep->recbytes = 0;
+    pstatep->harderrcount = 0;
+    pstatep->opstate = PERTEXUS_STATE_OPSTATE_RSTART;
+    pcmd(pstatep, 0);
+}
+
+/*
+ * After seeing IDBY go deasserted after a READ command, clean
+ *  up and move on.
+ *
+ * This function is called from the IDBY interrupt only
+ *  when we're in PERTEXUS_STATE_OPSTATE_RINREC or
+ *  PERTEXUS_STATE_OPSTATE_RFMSEEN.
+ */
+static inline void
+readrecfinish(pertexus_state_t *pstatep)
+{
+    uint8_t          wrrec;
+
+    /*
+     * Retire the current frame.  Note that we are *guaranteed*
+     *  to have a record slot to write to because we would not
+     *  have started the read without one.
+     */
+    /* Note: recbytes will be 0 when we just read a filemark */
+    wrrec = pstatep->wrrec;
+    pstatep->taperecs[wrrec].len = pstatep->recbytes;
+    pstatep->taperecs[wrrec].flags = (pstatep->harderrcount != 0
+                                      ? TAPE_REC_FLAGS_ERR
+                                      : 0);
+
+    NONATOMIC_INCR1_MOD(wrrec, TAPENRECS);
+    pstatep->wrrec = wrrec;
+
+    /*
+     * Have we seen consecutive filemarks?
+     */
+    if (pstatep->fmcount > 1) {
+        /*
+         * We interpret this as the end of the tape.
+         */
+        pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+    }
+    else {
+        /*
+         * Time to start reading another record.
+         */
+        if (!RING_ISFULL(wrrec, pstatep->rdrec, TAPENRECS)
+            && !RINGPTR_ISFULL(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ)) {
+            readrecstart(pstatep);
+        }
+        else {
+            /* Go back to the paused state */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_RPAUSED;
+        }
+    }
+}
+
+static void
+interrupts_init(pertexus_state_t *pstatep)
+{
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IRSTR)),
+                    &irstr_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IWSTR)),
+                    &iwstr_isr, RISING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IDBY)),
+                    &idby_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IFMK)),
+                    &ifmk_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_ICER)),
+                    &icer_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IHER)),
+                    &iher_isr, FALLING);
+}
+
+/*
+ * Set up interrupts for a particular operation
+ */
+static void
+interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
+{
+    /*
+     * GPIO6: IFMK (3) 
+     * GPIO7: ICER (29), IHER (28), IWSTR (19), IRSTR (18)
+     * GPIO9: IDBY (6)
+     */
+
+    /* Assert that ICER, IHER, IWSTR, and IRSTR are all in the same
+     *  interrupt group */
+    
+    ASSERT_CT(GP_SETNUM(GP_ICER) == GP_SETNUM(GP_IHER));
+    ASSERT_CT(GP_SETNUM(GP_IHER) == GP_SETNUM(GP_IWSTR));
+    ASSERT_CT(GP_SETNUM(GP_IWSTR) == GP_SETNUM(GP_IRSTR));
+    
+    switch (iconfig) {
+    case READING:
+        /* IFMK: On, ICER: Off, IHER: On, IWSTR: Off, IRSTR: On, IDBY: On */
+        *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
+        *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
+
+        *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
+                                 | GP_MASK(GP_IRSTR));
+        *GP_IMR_REG(GP_IRSTR) = (
+            (*GP_IMR_REG(GP_IRSTR)
+             & ~(GP_MASK(GP_ICER)
+                 | GP_MASK(GP_IWSTR)))
+            | (GP_MASK(GP_IHER)
+               | GP_MASK(GP_IRSTR)));
+
+        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
+        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
+        break;
+
+    case WRITING:
+        /* IFMK: Off, ICER: Off, IHER: On, IWSTR: On, IRSTR: Off, IDBY: On */
+        *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
+
+        *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
+                                 | GP_MASK(GP_IWSTR));
+        *GP_IMR_REG(GP_IRSTR) = (
+            (*GP_IMR_REG(GP_IRSTR)
+             & ~(GP_MASK(GP_ICER)
+                 | GP_MASK(GP_IRSTR)))
+            | (GP_MASK(GP_IHER)
+               | GP_MASK(GP_IWSTR)));
+
+        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
+        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
+        break;
+
+    case ALLOFF:
+        /* IFMK: Off, ICER: Off, IHER: Off, IWSTR: Off, IRSTR: Off, IDBY: Off */
+        *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
+        *GP_IMR_REG(GP_IRSTR) &= ~(
+            GP_MASK(GP_ICER)
+            | GP_MASK(GP_IHER)
+            | GP_MASK(GP_IWSTR)
+            | GP_MASK(GP_IRSTR));
+        *GP_IMR_REG(GP_IDBY) &= ~GP_MASK(GP_IDBY);
+        break;
+
+    default:
+    case IDLE:
+        /* IFMK: On, ICER: On, IHER: On, IWSTR: On, IRSTR: On, IDBY: On */
+        *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
+        *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
+
+        *GP_ISR_REG(GP_IRSTR) = (
+            GP_MASK(GP_ICER)
+            | GP_MASK(GP_IHER)
+            | GP_MASK(GP_IWSTR)
+            | GP_MASK(GP_IRSTR));
+        *GP_IMR_REG(GP_IRSTR) |= (
+            GP_MASK(GP_ICER)
+            | GP_MASK(GP_IHER)
+            | GP_MASK(GP_IWSTR)
+            | GP_MASK(GP_IRSTR));
+
+        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
+        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
+        break;
+    }
+}
 
 /*
  * Port expander primitive functions.  Reference: [7]
@@ -1178,6 +1411,117 @@ portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
 
 
 /*
+ * Print out all of the state.
+ */
+static void
+debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp)
+{
+    unsigned int         nbytes, baseoff, off;
+    uint8_t             byteval;
+    uint8_t             *baserdptr, *rdptr;
+
+    outstreamp->print(F("opstate = "));
+    outstreamp->println(pstatep->opstate, DEC);
+
+    outstreamp->print(F("fmcount = "));
+    outstreamp->println(pstatep->fmcount, DEC);
+
+    outstreamp->print(F("rdrec = "));
+    outstreamp->print(pstatep->rdrec, DEC);
+    outstreamp->print(F(", wrrec = "));
+    outstreamp->print(pstatep->wrrec, DEC);
+    outstreamp->print(F(", ISEMPTY = "));
+    outstreamp->print((int) RING_ISEMPTY(pstatep->wrrec,
+                                         pstatep->rdrec, TAPENRECS), DEC);
+    outstreamp->print(F(", ISFULL = "));
+    outstreamp->println((int) RING_ISFULL(pstatep->wrrec,
+                                         pstatep->rdrec, TAPENRECS), DEC);
+
+    outstreamp->print(F("base = 0x"));
+    hexprint32(outstreamp, (uint32_t) &(pstatep->buf[0]), 8);
+    outstreamp->print(F(", rdptr = 0x"));
+    hexprint32(outstreamp, (uint32_t) pstatep->rdptr, 8);
+    outstreamp->print(F(", wrptr = 0x"));
+    hexprint32(outstreamp, (uint32_t) pstatep->wrptr, 8);
+    outstreamp->print(F(", FREE = "));
+    outstreamp->print(RINGPTR_FREE(pstatep->wrptr,
+                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", USED = "));
+    outstreamp->print(RINGPTR_USED(pstatep->wrptr,
+                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", ISEMPTY = "));
+    outstreamp->print(RINGPTR_ISEMPTY(pstatep->wrptr,
+                                      pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", ISFULL = "));
+    outstreamp->println(RINGPTR_ISFULL(pstatep->wrptr,
+                                       pstatep->rdptr, TAPEBUFSIZ), DEC);
+
+    outstreamp->print(F("harderrcount = "));
+    outstreamp->println(pstatep->harderrcount, DEC);
+
+    outstreamp->print(F("recbytes = "));
+    outstreamp->println((uint32_t) pstatep->recbytes, DEC);
+
+    outstreamp->print(F("filesdone = "));
+    outstreamp->println(pstatep->filesdone, DEC);
+
+    outstreamp->print(F("recsdone = "));
+    outstreamp->println(pstatep->recsdone, DEC);
+
+    /* print out the buffer pointers */
+    nbytes = RINGPTR_USED(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ);
+
+    /* now dump the data buffer */
+    baserdptr = pstatep->rdptr;
+    baseoff = 0;
+
+    while (baseoff < nbytes) {
+        hexprint(outstreamp, baseoff, 4);
+        outstreamp->print(F(" "));
+        hexprint32(outstreamp, (uint32_t) baserdptr, 8);
+        outstreamp->print(F(":  "));
+
+        rdptr = baserdptr;
+        /* First the hexadecimal values */
+        for (off = 0; off < 16; off++) {
+            outstreamp->print(F(" "));
+            if ((baseoff + off) < nbytes) {
+                hexprint(outstreamp, *rdptr++, 2);
+                RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            }
+            else {
+                outstreamp->print("  ");
+            }
+        }
+
+        outstreamp->print(F("   |"));
+        /* Now the text */
+        for (off = 0; off < 16; off++) {
+            if ((baseoff + off) < nbytes) {
+                byteval = *baserdptr++;
+
+                if (isPrintable(byteval)) {
+                    outstreamp->print((char) byteval);
+                }
+                else {
+                    outstreamp->print('.');
+                }
+                RINGPTR_WRAP(baserdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            }
+            else {
+                outstreamp->print(' ');
+            }
+        }
+        outstreamp->println(F("|"));
+        baseoff += 16;
+    }
+
+    /*
+     * Now dump the record buffer.
+     */
+}
+
+/*
  * Initialize the connection to the SD card.
  */
 static bool_t
@@ -1222,10 +1566,6 @@ sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
     }
 #endif
 
-    pstatep->root = pstatep->sdp->open("/");
-    /* !!!???error check */
-    printDirectory(pstatep->root, 0, streamp);
-
     pertexus_state.sdcardinit = TRUE;
 
     return TRUE;
@@ -1254,7 +1594,7 @@ printDirectory(File dir, int numSpaces, Stream *outstreamp)
             DateTimeFields datetime;
             if (entry.getModifyTime(datetime)) {
                 printSpaces(4, outstreamp);
-                printTime(datetime, outstreamp);
+                printTime(datetime, outstreamp, FALSE);
             }
             outstreamp->println();
         }
@@ -1271,29 +1611,46 @@ printSpaces(int num, Stream *outstreamp)
 }
 
 static void
-printTime(const DateTimeFields tm, Stream *outstreamp)
+printTime(const DateTimeFields tm, Stream *outstreamp, bool_t printsecs)
 {
+    const char *daysofweek[7] = {
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+    };
     const char *months[12] = {
-        "January","February","March","April","May","June",
-        "July","August","September","October","November","December"
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
     };
 
-    if (tm.hour < 10) {
-        outstreamp->print('0');
-    }
+    outstreamp->print(tm.wday < 7 ? daysofweek[tm.wday] : "???");
+    outstreamp->print(' ');
     
+    outstreamp->print(tm.mon < 12 ? months[tm.mon] : "???");
+    outstreamp->print(' ');
+
+    if (tm.mday < 10) {
+        outstreamp->print(' ');
+    }
+    outstreamp->print(tm.mday);
+    outstreamp->print(' ');
+
+    if (tm.hour < 10) {
+        outstreamp->print(' ');
+    }
     outstreamp->print(tm.hour);
     outstreamp->print(':');
     if (tm.min < 10) {
         outstreamp->print('0');
     }
-    
     outstreamp->print(tm.min);
-    outstreamp->print("  ");
-    outstreamp->print(tm.mon < 12 ? months[tm.mon] : "???");
-    outstreamp->print(" ");
-    outstreamp->print(tm.mday);
-    outstreamp->print(", ");
+
+    if (printsecs) {
+        outstreamp->print(':');
+        if (tm.sec < 10) {
+            outstreamp->print('0');
+        }
+        outstreamp->print(tm.sec);
+    }
+    outstreamp->print(' ');
     outstreamp->print(tm.year + 1900);
 }
 
@@ -1521,6 +1878,342 @@ bitwait(volatile uint32_t *regp, uint32_t bitmask, bool_t bitset,
     /* We're aborting for one reason or another */
     return FALSE;
 }
+
+/*
+ * Reset the Pertec interface by deasserting (setting) IFEN and
+ *  then reasserting it.
+ */
+static void
+ifreset(pertexus_state_t *pstatep)
+{
+    /* Reset the interface */
+    GP_WRITE(pstatep, GP_IFEN, 1);
+    delayMicroseconds(5);
+    GP_WRITE(pstatep, GP_IFEN, 0);
+}
+
+
+/*
+ * Interrupt handlers.
+ */
+
+static void
+irstr_isr(void)
+{
+    uint8_t         *wrptr;
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_RINREC) {
+        wrptr = pstatep->wrptr;
+        /*
+         * Is there any space?
+         */
+        if (!RINGPTR_ISFULL(wrptr, pstatep->rdptr, TAPEBUFSIZ)) {
+            /* Yes.  Stow the datum away */
+            *wrptr++ = ~(*GP_DR_REG(GP_IR7) >> GP_BITNUM(GP_IR7));
+            RINGPTR_WRAP(wrptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            pstatep->wrptr = wrptr;
+            pstatep->recbytes++;
+        }
+        else {
+            /* No space.  We have problems. */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_ROVERRUN;
+        }
+        /* In either case, we reset the consecutive filemark count */
+        pstatep->fmcount = 0;
+    }
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.irstr++;
+#endif
+}
+
+/* IWSTR interrupt */
+/*
+ * This is used to write the tape.  The tape drive toggles
+ *  IWSTR to elicit data.
+ *
+ *                    updated by
+ *              this func     interruptable code
+ * data ring    rdptr         wrptr
+ */
+
+/*
+ * The tape drive asserts (lowers) IWSTR and then, 1.6 microseconds
+ *  later, it deasserts (raises) it.  I believe it is on the deassertion
+ *  transition that it samples IWn (and ILWD).
+ * We had been attempting to set IWn with this interrupt handler,
+ *  triggered by the asserting (downgoing) transition.
+ * To be optimal, what
+ *  I'm doing is having the interrupt happen on the *upgoing*
+ *  transition, and at that time we put the *next* value onto
+ *  the wire.  There is inherently enough latency that I believe
+ *  this will not cause a problem.
+ */
+
+
+static void
+iwstr_isr(void)
+{
+    uint8_t         *rdptr;
+    uint32_t                 regval;
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    /* Put up the new value */
+    regval = *GP_DR_REG(GP_IW7);
+    regval &= ~(0xff << GP_BITNUM(GP_IW7));
+    regval |= pstatep->wrnextbyte << GP_BITNUM(GP_IW7);
+    *GP_DR_REG(GP_IW7) = regval;
+
+    /* Possibly assert the last word bit */
+    if (pstatep->wrlwd) {
+        GP_WRITE(pstatep, GP_ILWD, 0);
+    }
+    
+
+    /* Do we have a current record we're writing? */
+    if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_WINREC) {
+        /*
+         * Have we already written the final value?
+         */
+        if (pstatep->recbytes == 0) {
+            pstatep->wrnextbyte = ~0;
+            pstatep->wrlwd = FALSE;
+
+            /*
+             * We're actually expecting one more IWSTR
+             *  deassertion interrupt,
+             *  but we won't have anything to do there except
+             *  write the above values on the wire.
+             */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_WRECDONE;
+        }
+        else {
+            rdptr = pstatep->rdptr;
+            /* Do we have data available for the next byte? */
+            if (!RINGPTR_ISEMPTY(pstatep->wrptr, rdptr, TAPEBUFSIZ)) {
+                pstatep->wrnextbyte = ~(*rdptr++);
+                RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+                pstatep->rdptr = rdptr;
+
+                if (--pstatep->recbytes == 0) {
+                    /* Also assert ILWD on last byte */
+                    pstatep->wrlwd = TRUE;
+                }
+            }
+            else {
+                /* oops...we're out of data; we'll effectively
+                 *  re-write the previous byte but we'll end
+                 *  the whole thing here. */
+                pstatep->wrlwd = TRUE;
+                pstatep->opstate = PERTEXUS_STATE_OPSTATE_ERRWAIT;
+            }
+        }
+    }
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.iwstr++;
+#endif
+}
+
+
+/* IDBY interrupt */
+static void
+idby_isr(void)
+{
+    bool_t           idby_asserted;
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    idby_asserted = GP_READ(pstatep, GP_IDBY) == 0;
+
+    switch (pstatep->opstate) {
+
+    case PERTEXUS_STATE_OPSTATE_ERRWAIT:
+        /*
+         * We ran out of data (underran), so we're just
+         *  waiting for the command to complete.
+         */
+        if (!idby_asserted) {
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_ERROR;
+        }
+        break;
+
+    /*
+     * Write states
+     */
+    case PERTEXUS_STATE_OPSTATE_WRECSTART:
+        /*
+         * We did an IWRT waiting for IDBY to go active so
+         *  we can put a byte on the wire.  Note that we would
+         *  not have done the IWRT command if we had not
+         *  had at least one byte of data available to send.
+         */
+        if (idby_asserted) {
+            uint8_t     *rdptr;
+            uint32_t         regval;
+
+            rdptr = pstatep->rdptr;
+            /* Put the first byte directly onto the wire. */
+            regval = *GP_DR_REG(GP_IW7);
+            regval &= ~(0xff << GP_BITNUM(GP_IW7));
+            regval |= ~(*rdptr++) << GP_BITNUM(GP_IW7);
+            *GP_DR_REG(GP_IW7) = regval;
+
+            RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+
+            if (--pstatep->recbytes == 0) {
+                /* This is a 1 byte record.  Assert ILWD. */
+                GP_WRITE(pstatep, GP_ILWD, 0);
+                pstatep->wrnextbyte = ~0;       /* float them */
+                pstatep->wrlwd = FALSE;         /* leave ILWD alone */
+
+                pstatep->opstate = PERTEXUS_STATE_OPSTATE_WRECDONE;
+            }
+            else {
+                /*
+                 * This is a 2 or more byte record.  Set up the
+                 *  next data byte in the GPRIOn register.
+                 */
+                pstatep->wrnextbyte = ~(*rdptr++);
+                RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+
+                if (--pstatep->recbytes == 0) {
+                    /* This is a 2 byte record.  Assert ILWD on the next. */
+                    pstatep->wrlwd = TRUE;         /* assert ILWD */
+                }
+                else {
+                    pstatep->wrlwd = FALSE;         /* leave ILWD alone */
+                }
+                pstatep->opstate = PERTEXUS_STATE_OPSTATE_WINREC;
+            }
+
+            pstatep->rdptr = rdptr;
+        }
+        break;
+
+    case PERTEXUS_STATE_OPSTATE_WRECDONE:
+        /*
+         * We were waiting for IDBY to become deasserted
+         *  after we wrote the final byte of a record.
+         */
+        if (!idby_asserted) {
+            /* Clear the ILWD bit. */
+            GP_WRITE(pstatep, GP_ILWD, 1);
+
+            pstatep->recsdone++;
+
+            /* Advance the record */
+            NONATOMIC_INCR1_MOD(pstatep->rdrec, TAPENRECS);
+
+            /* Try to start the next record */
+            writerecstart(pstatep);
+        }
+        break;
+
+    case PERTEXUS_STATE_OPSTATE_WFMWAIT:
+        /*
+         * We were waiting for IDBY to become deasserted
+         *  after we wrote a filemark (WFM command).
+         */
+        if (!idby_asserted) {
+            pstatep->filesdone++;
+
+            /* Advance the record */
+            NONATOMIC_INCR1_MOD(pstatep->rdrec, TAPENRECS);
+
+            /* Try to start the next record */
+            writerecstart(pstatep);
+        }
+        break;
+
+    /*
+     * Read states
+     */
+    case PERTEXUS_STATE_OPSTATE_RSTART:
+        if (idby_asserted) {
+            /* Move to RINREC */
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_RINREC;
+        }
+        break;
+
+    case PERTEXUS_STATE_OPSTATE_RINREC:
+    case PERTEXUS_STATE_OPSTATE_RFMSEEN:
+        /*
+         * IDBY went inactive while we were reading a record.  We
+         *  may instead seen a filemark.  In any case, the recovery
+         *  action is the same.
+         */
+        if (!idby_asserted) {
+            readrecfinish(pstatep);
+        }
+        break;
+
+    }
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.idby++;
+#endif
+}
+
+/* IFMK interrupt */
+static void
+ifmk_isr(void)
+{
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_RINREC) {
+        /* !!! should we make sure that IFMK is indeed asserted? */
+        pstatep->fmcount++;
+
+        pstatep->opstate = PERTEXUS_STATE_OPSTATE_RFMSEEN;
+    }
+}
+
+/* ICER interrupt */
+static void
+icer_isr(void)
+{
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.icer++;
+#endif
+}
+
+/* IHER interrupt */
+static void
+iher_isr(void)
+{
+    pertexus_state_t        *pstatep;
+ 
+    pstatep = &pertexus_state;
+
+    pstatep->harderrcount++;
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.iher++;
+#endif
+}
+
+/*
+ * Glue code to get the TimeLib to use the built-in
+ *  Teensy 4.1 RTC (which for some reason is called 'Teensy3Clock').
+ */
+static time_t
+getTeensy3Time(void)
+{
+    return Teensy3Clock.get();
+}
+
 /*
  * Commands:
  */
@@ -1539,6 +2232,163 @@ cmd_echo(cmdif_t *cmdifp, int argc, char **argv)
     cmdifp->outstreamp->print(F("\r\n"));
 }
 
+/*
+ * Print out the current date/time.
+ */
+static void
+cmd_date(cmdif_t *cmdifp, int argc, char **argv)
+{
+    Stream              *outstreamp;
+    time_t               nowtime, settime;
+    int                  slen, val;
+    const char          *errstr;
+    char                *sp, *dsp, ntmp[5];
+    DateTimeFields       now_tm, set_tm;
+
+    outstreamp = cmdifp->outstreamp;
+    errstr = NULL;
+
+    nowtime = now();
+    /* Start with the current time information as a default */
+    breakTime(nowtime, set_tm);
+
+    if (argc > 1) {
+        slen = strlen(argv[1]);
+        if (slen >= 8) {
+            ntmp[2] = '\0';
+            sp = argv[1];
+
+            ntmp[0] = *sp++;
+            ntmp[1] = *sp++;
+            val = atoi(ntmp);
+            if (val < 1 || val > 12) {
+                errstr = "invalid month";
+                goto usage;
+            }
+            set_tm.mon = val - 1;
+            
+            ntmp[0] = *sp++;
+            ntmp[1] = *sp++;
+            val = atoi(ntmp);
+            if (val < 1 || val > 31) {
+                errstr = "invalid date of month";
+                goto usage;
+            }
+            set_tm.mday = val;
+            
+            ntmp[0] = *sp++;
+            ntmp[1] = *sp++;
+            val = atoi(ntmp);
+            if (val < 0 || val > 23) {
+                errstr = "invalid hour";
+                goto usage;
+            }
+            set_tm.hour = val;
+            
+            ntmp[0] = *sp++;
+            ntmp[1] = *sp++;
+            val = atoi(ntmp);
+            if (val < 0 || val > 59) {
+                errstr = "invalid minute";
+                goto usage;
+            }
+            set_tm.min = val;
+
+            slen -= 8;
+            if (slen > 0) {
+                /* Remainder is [[CC]YY][.ss] */
+                dsp = sp;
+                /* Find the end or a '.', whichever comes first */
+                while (*dsp != '\0' && *dsp != '.') {
+                    dsp++;
+                }
+                if (dsp != sp) {
+                    /* Must be one of [[CC]YY] */
+                    if ((dsp - sp) == 2) {
+                        /* Use the century part of the current year */
+                        ntmp[0] = *sp++;
+                        ntmp[1] = *sp++;
+                        val = atoi(ntmp);
+
+                        /* Borrow the century from the current year */
+                        val += (set_tm.year - (set_tm.year%100));
+
+                        if (val < 70 || val > 206) {
+                            errstr = "2 digit year out of range";
+                        }
+
+                        set_tm.year = val;
+                        slen -= 2;
+                    }
+                    else if ((dsp - sp) == 4) {
+                        ntmp[0] = *sp++;
+                        ntmp[1] = *sp++;
+                        ntmp[2] = *sp++;
+                        ntmp[3] = *sp++;
+                        ntmp[4] = '\0';
+                        
+                        val = atoi(ntmp);
+
+                        if (val < 1970 || val > 2106) {
+                            errstr = "4 digit year out of range";
+                        }
+                        
+                        set_tm.year = val - 1900;
+                        slen -= 4;
+                    }
+                    else {
+                        errstr = "wrong year length";
+                        goto usage;
+                    }
+                }
+                if (*sp == '.') {
+                    sp++;
+                    slen--;
+                    if (slen != 2) {
+                        errstr = "seconds must be 2 digits";
+                        goto usage;
+                    }
+                    ntmp[0] = *sp++;
+                    ntmp[1] = *sp++;
+                    ntmp[2] = '\0';
+
+                    val = atoi(ntmp);
+
+                    if (val < 0 || val > 59) {
+                        errstr = "invalid seconds";
+                        goto usage;
+                    }
+
+                    set_tm.sec = val;
+                }
+            }
+
+            set_tm.wday = 7;        /* invalid, on purpose */
+            
+            settime = makeTime(set_tm);
+            Teensy3Clock.set(settime);
+            setTime(settime);
+        }
+        else {
+usage:
+            if (errstr != NULL) {
+                outstreamp->print(F("date: error: "));
+                outstreamp->println(errstr);
+            }
+
+            outstreamp->println(F("Usage: date [MMDDhhmm[[CC]YY][.ss]]"));
+
+            return;
+        }
+    }
+                
+    nowtime = now();
+    breakTime(nowtime, now_tm);
+
+    printTime(now_tm, outstreamp, TRUE);
+    outstreamp->println();
+}
+
 /* Reset the Pertec interface by toggling IFEN */
 static void
 cmd_reset(cmdif_t *cmdifp, int argc, char **argv)
@@ -1550,10 +2400,49 @@ cmd_reset(cmdif_t *cmdifp, int argc, char **argv)
     UNUSED(argc);
     UNUSED(argv);
 
-    /* Reset the interface */
-    GP_WRITE(pstatep, GP_IFEN, 1);
-    delayMicroseconds(5);
-    GP_WRITE(pstatep, GP_IFEN, 0);
+    ifreset(pstatep);
+}
+
+/* Print out statistics */
+static void
+cmd_stats(cmdif_t *cmdifp, int argc, char **argv)
+{
+    pertexus_state_t    *pstatep;
+    Stream              *outstreamp;
+
+    pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
+    outstreamp = cmdifp->outstreamp;
+
+    UNUSED(argv);
+
+#if defined(OPT_INTCOUNTS)
+    outstreamp->print(F("intcounts.icer = "));
+    outstreamp->println(pstatep->intcounts.icer);
+
+    outstreamp->print(F("intcounts.iher = "));
+    outstreamp->println(pstatep->intcounts.iher);
+
+    outstreamp->print(F("intcounts.iwstr = "));
+    outstreamp->println(pstatep->intcounts.iwstr);
+
+    outstreamp->print(F("intcounts.irstr = "));
+    outstreamp->println(pstatep->intcounts.irstr);
+
+    outstreamp->print(F("intcounts.idby = "));
+    outstreamp->println(pstatep->intcounts.idby);
+
+    outstreamp->print(F("intcounts.ifmk = "));
+    outstreamp->println(pstatep->intcounts.ifmk);
+#else
+    outstreamp->println(F("Interrupt statistics not being kept"));
+#endif
+
+    if (argc > 1) {
+        outstreamp->println(F("Counts reset"));
+#if defined(OPT_INTCOUNTS)
+        memset(&(pstatep->intcounts), 0, sizeof(pstatep->intcounts));
+#endif
+    }
 }
 
 static void
@@ -1578,6 +2467,858 @@ cmd_fsf(cmdif_t *cmdifp, int argc, char **argv)
     }
 }
 
+
+static void
+cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv)
+{
+    unsigned int     nrecsleft, nbytesleft, recsize;
+    uint8_t          writeval, regval;
+    volatile uint32_t    *stroberegp, *datregp, *cmdregp;
+    pertexus_state_t    *pstatep;
+
+    pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
+
+
+    UNUSED(argc);
+    UNUSED(argv);
+
+    recsize = 2048;
+    nrecsleft = 100;
+
+    /*
+     * Check to see if writing is disabled.
+     */
+    regval = GP_READ(pstatep, GP_IFPT);
+    if (regval == 0) {
+        cmdifp->outstreamp->println(F("Error: tape is write protected"));
+        goto fail1;
+    }
+
+    stroberegp = GP_DR_REG(GP_IWSTR);
+    datregp = GP_DR_REG(GP_IW0);
+    cmdregp = GP_DR_REG(GP_ILWD);
+
+    interrupts_set(pstatep, ALLOFF);
+
+    /* Turn off interrupts and go to town. */
+    while (nrecsleft != 0) {
+        writeval = (nrecsleft-1);   /* don't start with 0 all the time; it's
+                                     *  boring */
+        nbytesleft = recsize;
+
+        /* Start the writing */
+        pcmd(pstatep, PCMD_IWRT);
+
+        if (!bitwait(GP_DR_REG(GP_IFBY), GP_MASK(GP_IFBY), FALSE,
+                     NULL, 1000)) {
+            cmdifp->outstreamp->println(F("Error: IFBY failed to assert"));
+            goto fail2;
+        }
+
+        if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), FALSE,
+                     NULL, 2UL*1000UL*1000UL)) {
+            cmdifp->outstreamp->println(F("Error: IDBY failed to assert"));
+            goto fail3;
+        }
+
+        noInterrupts();
+
+        while (nbytesleft > 1) {
+            *datregp = ~writeval;       /* Inverted because that's
+                                         *  the way the lines are
+                                         *  specified. */
+            writeval--;
+            /* Wait to see a low-to-high transition of the strobe */
+            do {
+                regval = *stroberegp;
+            } while ((regval & GP_MASK(GP_IWSTR)) != 0);
+
+            while ((regval & GP_MASK(GP_IWSTR)) == 0) {
+                regval = *stroberegp;
+            }
+
+            nbytesleft--;
+        }
+
+        /* Write the final byte and set the ILWD bit */
+        *cmdregp &= ~GP_MASK(GP_ILWD);
+        *datregp = ~writeval;
+        /* Wait to see a low-to-high transition of the strobe */
+        do {
+            regval = *stroberegp;
+        } while ((regval & GP_MASK(GP_IWSTR)) != 0);
+
+        while ((regval & GP_MASK(GP_IWSTR)) == 0) {
+            regval = *stroberegp;
+        }
+
+        /* !!! ??? wait to finish */
+
+        nrecsleft--;
+
+        interrupts();
+
+        /* Clear the ILWD bit */
+        *cmdregp |= GP_MASK(GP_ILWD);
+    }
+
+    /* Now write a filemark */
+    pcmd(pstatep, PCMD_IWRT | PCMD_IWFM);
+
+    /* And re-activate interrupts */
+    return;
+
+fail1:      /* FPT is asserted */
+    ;
+
+fail2:      /* IFBY failed to assert within a certain amount of time */
+    ;
+
+fail3:      /* IDBY failed to assert within a certain amount of time */
+    ;
+}
+
+/*
+ * Write a tape image file to tape.
+ */
+static void
+cmd_write(cmdif_t *cmdifp, int argc, char **argv)
+{
+    File             readfile;
+    uint32_t         header, footer;
+    recsize_t        recleft;
+    bool_t           filedone;
+#if 0
+    uint8_t          timsk0_saved;
+#endif
+    uint8_t          pattern, patwriteval, postgap, wrrec;
+    uint8_t         *wrptr;
+    uint16_t         spaceavail, readsize, patrecsleft;
+    int              inchar;
+    tape_rec_t      *trp;
+    Stream          *streamp;
+    pertexus_state_t    *pstatep;
+
+    pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
+
+    streamp = cmdifp->outstreamp;
+
+    if (argc < 2) {
+        streamp->println(F("usage: write tape-image-file"));
+        return;
+    }
+
+    if (strcmp(argv[1], "-pattern") == 0) {
+        pattern = TRUE;
+        patrecsleft = 100;
+    }
+    else {
+        pattern = FALSE;
+        if (!pstatep->sdcardinit) {
+            if (!sdcard_init(pstatep, streamp)) {
+                streamp->println(F("SD card initialization failed."));
+                return;
+            }
+        }
+
+        readfile = pstatep->sdp->open(argv[1], FILE_READ);
+
+        if (!readfile) {
+            streamp->println(F("unable to open file"));
+            return;
+        }
+    }
+
+
+    /*
+     * Check to see if writing is disabled.
+     */
+    if (GP_READ(pstatep, GP_IFPT) == 0) {
+        streamp->println(F("Error: tape is write protected"));
+        readfile.close();
+        return;
+    }
+
+    /* Initialize our state */
+    pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+    pstatep->rdptr = pstatep->wrptr = &(pstatep->buf[0]);
+    pstatep->rdrec = pstatep->wrrec = 0;
+    pstatep->filesdone = pstatep->recsdone = 0;
+    recleft = 0;        /* avoid compiler warning */
+    patwriteval = 0;    /* avoid compiler warning */
+    filedone = FALSE;
+    trp = NULL;
+
+    interrupts_set(pstatep, WRITING);
+    /* turn off timer interrupts */
+#if 0
+    timsk0_saved = TIMSK0;
+    TIMSK0 = 0;
+#endif
+
+    /*                    updated by
+     *              this func     interrupt
+     * data ring    wrptr%        rdptr*
+     * record ring  wrrec         rdrec
+     *
+     * * = must be read with ATOMIC_READ because this is a
+     *     multi-byte variable.
+     * % = must be written with ATOMIC_WRITE because this is
+     *     a multi-byte variable.
+     */
+
+
+    while (pstatep->opstate != PERTEXUS_STATE_OPSTATE_ERROR
+           && (!filedone || pstatep->opstate != PERTEXUS_STATE_OPSTATE_IDLE)) {
+        /*
+         * Are we not in a record and there's space for a new
+         *  record?
+         */
+        if (!filedone && trp == NULL) {
+            /* rdrec is safe to read without interrupt protection because
+             *  it is a single byte */
+            ASSERT_CT(sizeof(pstatep->rdrec) == 1);
+
+            wrrec = pstatep->wrrec;
+            if (!RING_ISFULL(wrrec, pstatep->rdrec, TAPENRECS)) {
+                if (pattern == 0) {
+                    /*
+                     * Read in the header.
+                     */
+                    if (readfile.read(&header, sizeof(uint32_t))
+                                                    != sizeof(uint32_t)) {
+                        /* We're at the end of file. */
+                        filedone = TRUE;
+                    }
+                    else {
+                        /* We're now in a record. */
+                        /* streamp->print(F("Starting to load record, wrrec = ")); */
+                        /* streamp->print(pstatep->wrrec, DEC); */
+                        /* streamp->print(F(", rdrec = ")); */
+                        /* streamp->print(pstatep->rdrec, DEC); */
+                        /* streamp->print(F(", recsavail = ")); */
+                        /* streamp->print(recsavail, DEC); */
+                        /* streamp->print(F(", header = 0x")); */
+                        /* streamp->print(header, HEX); */
+                        /* streamp->println(); */
+
+                        trp = &(pstatep->taperecs[wrrec]);
+                        trp->len = recleft = (header & 0x00ffffffUL);
+
+                        if (header == 0) {
+                            /* It's a file mark, so we're done with this */
+                            trp = NULL;
+                        }
+                    }
+                }
+                else {
+                    /* We're generating from a pattern */
+                    trp = &(pstatep->taperecs[wrrec]);
+                    if (patrecsleft == 0) {
+                        /* Write a filemark */
+                        trp->len = recleft = 0;
+                        filedone = TRUE;
+                        trp = NULL;
+                    }
+                    else {
+                        /* Set up to write a pattern */
+                        patrecsleft--;
+                        patwriteval = patrecsleft;
+                        trp->len = recleft = 2048;
+                    }
+                }
+
+                /*
+                 * Tricky business here.  Even though we are not
+                 *  done with this record (we don't even have
+                 *  any data on it, if there are going to be
+                 *  data) we advance the wrrec here so that
+                 *  the interrupt FSM can know that a record is
+                 *  available.
+                 * Note that as soon as we do this we cannot change
+                 *  anything in the record structure.
+                 */
+                NONATOMIC_INCR1_MOD(wrrec, TAPENRECS);
+                /* No need to use "ATOMIC_WRITE()" because this is a
+                 *  single byte */
+                pstatep->wrrec = wrrec;
+
+                /*
+                 * We want to keep loading data until we
+                 *  run out of space before we actually start
+                 *  things up, so any action we take that
+                 *  consumes more space should be followed by
+                 *  an attempt to consume more.
+                 */
+                if (trp == NULL) {
+                    continue;
+                }
+            }
+        }
+
+        /*
+         * Do we have space for data?
+         */
+
+        if (!filedone && trp != NULL) {
+            uint8_t             *rdptr;
+
+            rdptr = ATOMIC_READ(pstatep->rdptr);
+            wrptr = pstatep->wrptr;
+            spaceavail = RINGPTR_FREE(wrptr, rdptr, TAPEBUFSIZ);
+
+            if (spaceavail != 0) {
+                /* We're in a record and we have some space */
+                readsize = (uint16_t) MIN(recleft, (recsize_t) spaceavail);
+                readsize = MIN(readsize,
+                               RINGPTR_TOEND(wrptr, &(pstatep->buf[0]),
+                                             TAPEBUFSIZ));
+
+                /* streamp->print(F("Reading ")); */
+                /* streamp->print(readsize, DEC); */
+                /* streamp->println(F(" bytes of record data")); */
+                if (pattern == 0) {
+                    /*
+                     * Cap the readsize so as to get us back on
+                     *  block alignment.  Reading fewer data than
+                     *  we can also turns the data around more
+                     *  quickly so we're less likely to underrun.
+                     */
+                    readsize = MIN(readsize,
+                                   (~((uint16_t) readfile.position())
+                                    & (FILEBLKSIZ-1)) + 1);
+                    (void) readfile.read(wrptr, readsize);
+                    /* !!! error handling if read fails */
+                    wrptr += readsize;
+                }
+                else {
+                    uint16_t         idx;
+
+                    idx = readsize;
+                    while (idx-- != 0) {
+                        *wrptr++ = patwriteval--;
+                    }
+                }
+
+                RINGPTR_WRAP(wrptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+                ATOMIC_WRITE(pstatep->wrptr, wrptr);
+                recleft -= readsize;
+
+                if (recleft == 0) {
+                    /* Skip over the record's trailer */
+                    if (pattern == 0) {
+                        /*
+                         * Remember to skip some bytes before
+                         *  reading the footer (so as to
+                         *  become aligned again).
+                         */
+                        postgap = -((uint8_t) trp->len) & 1;
+                        if (postgap != 0) {
+                            (void) readfile.seek(postgap, SeekCur);
+                        }
+                        (void) readfile.read(&footer, sizeof(uint32_t));
+                    }
+
+                    trp = NULL;
+                }
+
+                /*
+                 * We want to keep loading data until we
+                 *  run out of space before we actually start
+                 *  things up, so any action we take that
+                 *  consumes more space should be followed by
+                 *  an attempt to consume more.
+                 */
+                continue;
+            }
+        }
+
+
+        /*
+         * Are we at idle?
+         */
+        if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_IDLE) {
+            streamp->println(F("Starting"));
+            /* Do we have anything to start with? */
+            writerecstart(pstatep);
+        }
+
+        if ((inchar = streamp->read()) == '\03') {
+            bool_t      mustwait;
+
+            /*
+             * We're aborting due to ^C.  Note that any other keypress
+             *  will simply be eaten and thrown away.  Well, we're on
+             *  the cheap.
+             */
+            mustwait = FALSE;
+            noInterrupts();
+            /* Force everything to an end */
+            switch (pstatep->opstate) {
+            case PERTEXUS_STATE_OPSTATE_IDLE:
+            case PERTEXUS_STATE_OPSTATE_ERROR:
+                break;
+
+            case PERTEXUS_STATE_OPSTATE_WINREC:
+            case PERTEXUS_STATE_OPSTATE_WRECSTART:
+            case PERTEXUS_STATE_OPSTATE_WRECDONE:
+                /* We've issued an IWRT, and we were waiting for
+                 *  IDBY.  So force the record to end and move
+                 *  to WRECDONE, and then write a tape mark.  */
+                GP_WRITE(pstatep, GP_ILWD, 0);
+                pstatep->opstate = PERTEXUS_STATE_OPSTATE_WRECDONE;
+                pstatep->rdrec = TAPENRECS-1;
+                pstatep->taperecs[0].len = 0;       /* write a tapemark */
+                pstatep->wrrec = 1;
+                mustwait = TRUE;
+                break;
+
+            case PERTEXUS_STATE_OPSTATE_ERRWAIT:
+            case PERTEXUS_STATE_OPSTATE_WFMWAIT:
+                pstatep->rdrec = pstatep->wrrec = 0;
+                mustwait = TRUE;
+                break;
+            }
+
+            interrupts();
+
+            if (mustwait) {
+                while (pstatep->opstate != PERTEXUS_STATE_OPSTATE_IDLE
+                       && pstatep->opstate != PERTEXUS_STATE_OPSTATE_ERROR) {
+                    ;
+                }
+            }
+            break;
+        }
+    }
+
+    if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_ERROR) {
+        streamp->println(F("Write ended in error (underrun)"));
+        streamp->print(F(" recsdone = "));
+        streamp->print(pstatep->recsdone, DEC);
+        streamp->print(F(", filesdone = "));
+        streamp->println(pstatep->filesdone, DEC);
+    }
+
+    readfile.close();
+
+#if 0
+    /* turn timer interrupts back on again */
+    TIMSK0 = timsk0_saved;
+#endif
+}
+
+
+/*
+ * Read a tape into a tape image file.
+ */
+static void
+cmd_read(cmdif_t *cmdifp, int argc, char **argv)
+{
+    File             writefile;
+    recsize_t        recsofar, reclen;
+    uint32_t         header, lastfooteroff, prealloc;
+    uint8_t          rdrec;
+#if 0
+    uint8_t          timsk0_saved;
+#endif
+    uint8_t         *rdptr, *wrptr;
+    uint16_t         writesize, lastwritesize;
+    int              inchar;
+    tape_rec_t      *trp;
+    Stream          *streamp;
+    bool_t           nofile;
+    pertexus_state_t    *pstatep;
+
+    pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
+    streamp = cmdifp->outstreamp;
+
+    prealloc = 60UL*1024UL*1024UL;      /* preallocate 60 MiB */
+
+    if (argc < 2) {
+        streamp->println(F("usage: read tape-image-file"));
+        return;
+    }
+
+    if (strcmp(argv[1], "-") == 0) {
+        nofile = TRUE;
+    }
+    else {
+        if (!pstatep->sdcardinit) {
+            if (!sdcard_init(pstatep, streamp)) {
+                streamp->println(F("SD card initialization failed."));
+                return;
+            }
+        }
+
+#if 0
+        streamp->print(F("Creating contiguous file "));
+        streamp->print(prealloc, DEC);
+        streamp->print(F(" bytes long..."));
+
+        if (!writefile.createContiguous(&(pstatep->root),
+                                        argv[1], prealloc)) {
+            streamp->println(F("unable to open file"));
+            return;
+        }
+        streamp->println(F("done"));
+#else
+        writefile = pertexus_state.sdp->open(argv[1], FILE_WRITE);
+        if (!writefile) {
+            streamp->println(F("unable to open file"));
+            return;
+        }
+#endif
+        nofile = FALSE;
+    }
+
+    /* Initialize our state */
+    pstatep->opstate = PERTEXUS_STATE_OPSTATE_RPAUSED;
+    pstatep->rdptr = pstatep->wrptr = &(pstatep->buf[0]);
+    pstatep->rdrec = pstatep->wrrec = 0;
+    pstatep->filesdone = pstatep->recsdone = 0;
+    recsofar = 0;
+    lastfooteroff = 0;  /* offset past last valid footer */
+    header = 0;
+    writesize = lastwritesize = 0;      /* avoid compiler warning */
+
+    trp = NULL;
+
+    interrupts_set(pstatep, READING);
+#if 0
+    /* turn off timer interrupts */
+    timsk0_saved = TIMSK0;
+    TIMSK0 = 0;
+#endif
+
+    /*                    updated by
+     *              this func     interrupt
+     * data ring    rdptr%        wrptr*
+     * record ring  rdrec         wrrec
+     *
+     * * = must be read with ATOMIC_READ because this is a
+     *     multi-byte variable.
+     * % = must be written with ATOMIC_WRITE because this is
+     *     a multi-byte variable.
+     */
+
+    while (pstatep->opstate != PERTEXUS_STATE_OPSTATE_IDLE
+           || !RING_ISEMPTY(pstatep->wrrec, pstatep->rdrec, TAPENREC)) {
+
+        /*
+         * Have we accumulated data that we need to write
+         *  to the SD card?
+         */
+        /* We read these values so the compiler doesn't keep
+         *  re-fetching values that don't change. */
+        wrptr = ATOMIC_READ(pstatep->wrptr);
+        rdptr = pstatep->rdptr;
+        rdrec = pstatep->rdrec;
+        if (!RINGPTR_ISEMPTY(wrptr, rdptr, TAPEBUFSIZE)
+            || !RING_ISEMPTY(pstatep->wrrec, rdrec, TAPENREC)) {
+
+            lastwritesize = writesize;
+
+            /*
+             * Either the data ring is not empty or the
+             *  record ring is not empty.
+             */
+            if (RING_ISEMPTY(pstatep->wrrec, rdrec, TAPENREC)) {
+                /*
+                 * The record ring is empty.  This must mean
+                 *  we've started receiving data for a record
+                 *  but we haven't finished it.
+                 */
+                trp = NULL;
+                writesize = RINGPTR_USED(wrptr, rdptr, TAPEBUFSIZ);
+            }
+            else {
+                /*
+                 * We have a finished record (or file mark) in
+                 *  the queue.  Note that the length of this
+                 *  record is guaranteed to be less than or
+                 *  equal to the size of the data in the ring
+                 *  buffer.
+                 */
+                trp = &(pstatep->taperecs[rdrec]);
+                reclen = (recsize_t) (trp->len & 0x00ffffff);
+                writesize = (uint16_t) (reclen - recsofar);
+                /* Also: writesize *may be 0* if this is a filemark */
+            }
+
+            /*
+             * Now limit the write size so we don't go off
+             *  the end of ring buffer.  If there's more
+             *  data we'll get it on the next go around.
+             */
+            writesize = MIN(writesize,
+                            RINGPTR_TOEND(rdptr, &(pstatep->buf[0]),
+                                          TAPEBUFSIZ));
+
+            if (recsofar == 0) {
+                /*
+                 * We're starting a record.  Write a dummy
+                 *  header and we'll come back and
+                 *  fill this in afterwards.
+                 */
+
+                if (!nofile && writefile.write(&header, sizeof(uint32_t))
+                    != sizeof(uint32_t)) {
+                    goto writefail;
+                }
+            }
+
+            if (writesize > 0) {
+                if (!nofile) {
+                    /*
+                     * Limit the write size to whatever would get us
+                     *  back to block alignment.  Because the SD card
+                     *  code is working in blocks anyway this is the
+                     *  fastest way to make the buffer space available
+                     *  again, and it also minimizes the amount of
+                     *  data copying the SD card code does.
+                     */
+                    writesize = MIN(writesize,
+                                    (~((uint16_t) writefile.position())
+                                     & (FILEBLKSIZ-1)) + 1);
+                    if (writefile.write(rdptr, writesize) != writesize) {
+                        goto writefail;
+                    }
+                }
+
+                recsofar += writesize;
+            }
+
+            /* Advance the read offset */
+            rdptr += writesize;
+            RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            ATOMIC_WRITE(pstatep->rdptr, rdptr);
+
+            /* Did we finish this particular record? */
+            if (trp != NULL && recsofar == reclen) {
+                /* Yes, we did.  Write the footer, if one is needed. */
+                if (reclen != 0) {
+                    uint8_t      postgap;
+
+                    if (!nofile) {
+                        /*
+                         * First write dummy data to skip ahead to
+                         *  an aligned (2-byte aligned) offset.  Note that
+                         *  it is only ever written immediately after
+                         *  record data of length n*2+1.
+                         */
+                        postgap = -((uint8_t) reclen) & 1;
+                        if (postgap != 0) {
+                            if (writefile.write(&header, postgap) != postgap) {
+                                goto writefail;
+                            }
+                        }
+
+                        /*
+                         * NOTE: Hack here.  The tape_rec_t structure
+                         *  is designed to match the TAP file header/footer,
+                         *  which is a 32-bit value, even though tape_rec_t
+                         *  is made of a 24-bit and an 8-bit value.
+                         */
+
+                        if (writefile.write(&(trp->len), sizeof(uint32_t))
+                            != sizeof(uint32_t)) {
+writefail:
+                            streamp->println(F("Failure when writing."));
+
+                            break;
+                        }
+                    }
+                    pstatep->recsdone++;
+                }
+                else {
+                    pstatep->filesdone++;
+                }
+
+                /*
+                 * Note that if reclen == 0 then we just wrote
+                 *  a tapemark, and so the last thing we wrote
+                 *  was a header with 0 in it.  This serves as
+                 *  its own footer.
+                 */
+                if (!nofile) {
+                    lastfooteroff = writefile.position();
+                }
+
+                /* Advance the ring buffer */
+                NONATOMIC_INCR1_MOD(rdrec, TAPENRECS);
+                pstatep->rdrec = rdrec;
+                recsofar = 0;
+            }
+        }
+
+        if ((inchar = streamp->read()) == '\03') {
+            /*
+             * We're aborting due to ^C.  Note that any other keypress
+             *  will simply be eaten and thrown away.  Well, we're on
+             *  the cheap.
+             */
+            uint8_t      oldopstate;
+
+            oldopstate = ATOMIC_SWAP(pstatep->opstate,
+                                     PERTEXUS_STATE_OPSTATE_IDLE);
+
+            if (oldopstate != PERTEXUS_STATE_OPSTATE_IDLE
+                && oldopstate != PERTEXUS_STATE_OPSTATE_ROVERRUN) {
+                ifreset(pstatep);
+            }
+        }
+
+        /*
+         * Have we overrun?  If so then we need to abort.
+         */
+        if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_ROVERRUN) {
+            /*
+             * Note that we don't complete the record
+             *  we've been receiving.  That's okay and
+             *  we'll fix it by truncating the file, below.
+             */
+            ifreset(pstatep);
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+
+            streamp->println(F("Terminating due to overrun"));
+            debug_dumpstate(pstatep, streamp);
+            streamp->print(F("writesize = "));
+            streamp->print(writesize, DEC);
+            streamp->print(F(", lastwritesize = "));
+            streamp->println(lastwritesize, DEC);
+            streamp->print(F("lastfooteroff = "));
+            streamp->print(lastfooteroff, DEC);
+            streamp->print(F(", position = "));
+            streamp->println(writefile.position(), DEC);
+        }
+
+        /*
+         * Now that we've made some space we can attempt to
+         *  start up reception, if it's not running.
+         *
+         *  NOTE: it's safe to read wrptr and wrrec because we're
+         *  in the RPAUSED state, during which the interrupt handlers
+         *  will not change anything.
+         */
+        if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_RPAUSED
+            && RING_ISEMPTY(pstatep->wrrec,
+                            pstatep->rdrec, TAPENRECS)
+            && RINGPTR_ISEMPTY(pstatep->wrptr,
+                               pstatep->rdptr, TAPEBUFSIZ)) {
+
+            readrecstart(pstatep);
+        }
+    }
+
+    interrupts_set(pstatep, IDLE);
+
+    /*
+     * Finalize the file.  This involves truncating it
+     *  to just the valid data (if we ended in an overrun)
+     *  and going back and rewriting the record
+     *  headers (which are all 0s right now).
+     */
+    if (!nofile && lastfooteroff >= sizeof(uint32_t)) {
+        uint32_t         trashsize;
+
+        /*
+         * First: truncate the file so that it extends only
+         *  up to the last properly written footer.
+         */
+        trashsize = writefile.position() - lastfooteroff;
+        if (trashsize > 0) {
+            streamp->print(F("Removing remnants of last record (final "));
+            streamp->print(trashsize, DEC);
+            streamp->println(F(" bytes of the file)."));
+            writefile.truncate(lastfooteroff);
+        }
+        else if (lastfooteroff < prealloc) {
+            /* Just silently truncate the preallocated space */
+            streamp->print(F("Attempting to truncate file from "));
+            streamp->print(prealloc, DEC);
+            streamp->print(F(" bytes down to "));
+            streamp->print(lastfooteroff, DEC);
+            streamp->print(F(" bytes (nuking "));
+            streamp->print(prealloc - lastfooteroff, DEC);
+            streamp->print(F(" bytes)..."));
+            if (!writefile.truncate(lastfooteroff)) {
+                streamp->println(F("failed"));
+            }
+            else {
+                streamp->println(F("succeeded"));
+            }
+        }
+
+        /*
+         * Now go backward through the file, copying the
+         *  footers to headers.
+         *  lastfooteroff normally points just past the
+         *  footer.
+         */
+        streamp->print(F("Finalizing file, filesize = "));
+        streamp->print(writefile.size(), DEC);
+        streamp->print(F(", current position = "));
+        streamp->print(writefile.position(), DEC);
+        streamp->print(F(", lastfooteroff = "));
+        streamp->println(lastfooteroff, DEC);
+
+        while (lastfooteroff >= sizeof(uint32_t)) {
+            lastfooteroff -= sizeof(uint32_t);
+            writefile.seek(lastfooteroff, SeekSet);
+            /* streamp->print(F(" seeking to read at ")); */
+            /* streamp->println(lastfooteroff, DEC); */
+
+            if (writefile.read(&header, sizeof(uint32_t)) !=
+                sizeof(uint32_t)) {
+                streamp->println(
+                    F("Error reading footers when finalizing file"));
+                break;
+            }
+            reclen = (recsize_t) (header & 0x00ffffff);
+            /* streamp->print(F(" read header = 0x")); */
+            /* hexprint32(streamp, header, 8); */
+            /* streamp->print(F(", reclen = ")); */
+            /* streamp->println(reclen, DEC); */
+
+            if (reclen == 0) {
+                /* It's just a marker with no footer.  Skip back. */
+            }
+            else {
+                /* Round up to an even record length so that
+                 *  headers and footers stay 16-bit aligned */
+                reclen = (reclen + 1) & ~1;
+                lastfooteroff -= (reclen + sizeof(uint32_t));
+                /* streamp->print(F(" seeking to write at ")); */
+                /* streamp->println(lastfooteroff, DEC); */
+                writefile.seek(lastfooteroff, SeekSet);
+                if (writefile.write(&header, sizeof(uint32_t))
+                    != sizeof(uint32_t)) {
+                    streamp->println(
+                        F("Error writing header when finalizing file"));
+                    break;
+                }
+            }
+        }
+    }
+    else if (!nofile) {
+        writefile.truncate(lastfooteroff);
+    }
+
+    if (!nofile) {
+        writefile.close();
+    }
+#if 0
+    /* turn timer interrupts back on again */
+    TIMSK0 = timsk0_saved;
+#endif
+
+    streamp->print(F("Total of "));
+    streamp->print(pstatep->recsdone, DEC);
+    streamp->print(F(" records in "));
+    streamp->print(pstatep->filesdone, DEC);
+    streamp->println(F(" files"));
+}
 
 static void
 cmd_nop(cmdif_t *cmdifp, int argc, char **argv)
@@ -1768,8 +3509,6 @@ usage:
 
             lasthigh = TRUE;
 
-            noInterrupts();
-
             while (TRUE) {
                 /* If IDBY goes high we're done */
                 regval = *busyregp;
@@ -1814,8 +3553,6 @@ usage:
             }
             totalbytes += reclen;
 
-            /* re-activate interrupts */
-            interrupts();
             if (!allrecs) {
                 nrecsleft--;
             }
@@ -2148,8 +3885,9 @@ usage:
         (void) sdcard_init(pstatep, streamp);
     }
     else if (strcmp(argv[1], "dir") == 0) {
-        // list all files in the card with date and size
-        printDirectory(pertexus_state.root, 0, streamp);
+        File root = pstatep->sdp->open("/");
+        /* !!!???error check */
+        printDirectory(root, 0, streamp);
     }
     else if (strcmp(argv[1], "read") == 0) {
         File          readfile;

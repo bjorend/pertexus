@@ -4,11 +4,15 @@ INCLUDEDIRS="$(ARDUINOROOT)/hardware/teensy/avr/cores/teensy4" \
 	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/Wire" \
 	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/SD/src" \
 	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/SdFat/src" \
-	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/SPI"
+	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/SPI" \
+	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/Time"
 INCLUDES=$(shell echo $(INCLUDEDIRS) | xargs -n 1 cygpath -m | \
 	    xargs -I x echo -I\'x\')
+TEMPDIR=$(shell cygpath C:\Users\bkd\AppData\Local\Temp\arduino_build_355919)
 
 ARMGCC=$(GCCTOOLS)/bin/arm-none-eabi-g++
+ARMOBJDUMP=$(GCCTOOLS)/bin/arm-none-eabi-objdump
+ARMNM=$(GCCTOOLS)/bin/arm-none-eabi-gcc-nm
 CFLAGS_CPP=-O2 -g -Wall -ffunction-sections -fdata-sections -nostdlib \
 	-MMD -std=gnu++14 -fno-exceptions -fpermissive -fno-rtti \
 	-fno-threadsafe-statics -felide-constructors -Wno-error=narrowing \
@@ -27,3 +31,7 @@ CFLAGS_CPP=-O2 -g -Wall -ffunction-sections -fdata-sections -nostdlib \
 	    -include Arduino.h \
 	-o $@ -x c++ $(shell cygpath -m "$<")
 
+pertexusfw.dmp: $(TEMPDIR)/pertexusfw.ino.elf
+#	$(AVROBJDUMP) -hxasdt -lS -C "$(shell cygpath -w $<)" > $@
+	$(ARMOBJDUMP) -hxasdt -C "$(shell cygpath -w $<)" > $@
+	$(ARMNM) --demangle --numeric-sort "$(shell cygpath -w $<)" >> $@

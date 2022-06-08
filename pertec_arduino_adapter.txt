@@ -438,3 +438,92 @@ The problems I'm having now are:
       to unload, which is really annoying.
 
 
+
+----
+
+I seem to have been able to get around these problems and I'm reading
+and writing tapes now (though I have yet to actually check the data)!
+
+I found a bug in the breakTime() function, as distributed in
+c:\Program Files (x86)\Arduino\hardware\teensy\avr\cores\teensy4\Time.cpp
+as part of Teensduino 1.56.
+
+Here is a sample function that shows the problem:
+
+    static void
+    show_time_bug(const DateTimeFields &origtm)
+    {
+        DateTimeFields      newtm;
+        time_t              asint;
+
+        asint = makeTime(origtm);
+        breakTime(asint, newtm);
+
+        Serial.print("Date was ");
+        Serial.print(origtm.year + 1900);
+        Serial.print('/');
+        Serial.print(origtm.mon+1);
+        Serial.print('/');
+        Serial.print(origtm.mday);
+
+        Serial.print(" and is now ");
+        Serial.print(newtm.year + 1900);
+        Serial.print('/');
+        Serial.print(newtm.mon+1);
+        Serial.print('/');
+        Serial.println(newtm.mday);
+    }
+
+...
+
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 28, .mon = 1 /* February */,
+                    .year = (2022 - 1900) });
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 28, .mon = 1 /* February */,
+                    .year = (2020 - 1900) });
+
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 29, .mon = 1 /* February */,
+                    .year = (2022 - 1900) });
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 29, .mon = 1 /* February */,
+                    .year = (2020 - 1900) });
+
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 1, .mon = 2 /* March */,
+                    .year = (2022 - 1900) });
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 1, .mon = 2 /* March */,
+                    .year = (2020 - 1900) });
+
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 2, .mon = 2 /* March */,
+                    .year = (2022 - 1900) });
+        show_time_bug({.sec = 0, .min = 0, .hour = 0,
+                    .wday = 7 /* Purposefully invalid */,
+                    .mday = 2, .mon = 2 /* March */,
+                    .year = (2020 - 1900) });
+
+Results in:
+    Date was 2022/2/28 and is now 2022/2/28
+    Date was 2020/2/28 and is now 2020/2/28
+    Date was 2022/2/29 and is now 2022/3/1
+    Date was 2020/2/29 and is now 2020/2/29
+    Date was 2022/3/1 and is now 2022/3/2
+    Date was 2020/3/1 and is now 2020/2/29
+    Date was 2022/3/2 and is now 2022/3/3
+    Date was 2020/3/2 and is now 2020/3/1
+
+The bug in makeTime() will create an incorrect value for dates after
+the end of February if one of {year, year + 70} is a leap year but the
+other is not.
+
+I sent an email to Paul at pjrc.com and I've fixed it locally.
