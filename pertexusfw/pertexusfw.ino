@@ -87,7 +87,7 @@
  *      Group D signals.  Direction and output control, I2C.  These
  *      are all direct I/Os.
  *      6 = Group D
- *      
+ *
  *  b = for direct, level-shifted: GPIO set number (1..9)
  *      for port expander: port expander word number (0 or 1)
  *  c = for direct, level-shifted: GPIO number within set (0..31)
@@ -303,7 +303,7 @@
 /* Read a value from a port expander GPIO.  Caller must have made sure
  *  this is a port expander GPIO. */
 #define _GP_PORTEXP_READ(pstatep, setnum, bitnum)                       \
-    (((portexp_read((pstatep), PCA9535_CMD_INP0 + (setnum))             \
+    (((portexp_read((pstatep), (setnum))                                \
        & (1 << (bitnum))) != 0) ? HIGH : LOW)
 
 /* Read a value from a traditional GPIO.  Caller must ensure that this is
@@ -350,6 +350,11 @@ ASSERT_CT(GP_SETNUM(GP_IREV) == GP_SETNUM(GP_IGO));
 
 #define TAPEBUFSIZ      4096
 #define TAPENRECS       8           /* must be a power of two */
+
+
+/* Define a string of name n with value s which will be in cheap memory */
+#define CONSTSTRDEF(n, s)                                               \
+    const char n[] PROGMEM = s
 
 /*
  * Read a value atomically.  This is important for multi-byte values.
@@ -625,38 +630,30 @@ typedef enum {
 /* -------------------------------------------------------------------------- */
 /* Static prototypes */
 
-static void gpios_init(pertexus_state_t *pstatep);
-static inline void writerecstart(pertexus_state_t *pstatep);
+/* Functions that must run very quickly */
+static FASTRUN inline void writerecstart(pertexus_state_t *pstatep);
 static inline void readrecstart(pertexus_state_t *pstatep);
 static inline void readrecfinish(pertexus_state_t *pstatep);
-static void interrupts_init(pertexus_state_t *pstatep);
-static void interrupts_set(pertexus_state_t *pstatep,
-                           interrupt_config_t iconfig);
-static unsigned int portexp_read(pertexus_state_t *pstatep, int bytenum);
+static FASTRUN void interrupts_init(pertexus_state_t *pstatep);
+static FASTRUN void interrupts_set(pertexus_state_t *pstatep,
+                                   interrupt_config_t iconfig);
+static FASTRUN void ifreset(pertexus_state_t *pstatep);
+static FASTRUN void irstr_isr(void);
+static FASTRUN void iwstr_isr(void);
+static FASTRUN void idby_isr(void);
+static FASTRUN void ifmk_isr(void);
+static FASTRUN void icer_isr(void);
+static FASTRUN void iher_isr(void);
+
+/* Medium-speed functions */
+static unsigned int portexp_read(pertexus_state_t *pstatep, int portnum);
 static void portexp_write(pertexus_state_t *pstatep, unsigned int bytenum,
                           unsigned int val);
 static void portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
                              unsigned int val);
-static void debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp);
-static bool_t sdcard_init(pertexus_state_t *pstatep, Stream *streamp);
-static void printDirectory(File dir, int numSpaces, Stream *outstreamp);
-static void printSpaces(int num, Stream *outstreamp);
-static void printTime(const DateTimeFields tm, Stream *outstreamp,
-                      bool_t printsecs);
-static void printpad(Stream *streamp, const char *strp, int padlen);
-static void hexprint(Stream *outstream, unsigned int val, int ndigits);
-static void hexprint32(Stream *outstream, uint32_t val, int ndigits);
 static void pcmd(pertexus_state_t *pstatep, uint32_t cmdbits);
 static bool_t bitwait(volatile uint32_t *regp, uint32_t bitmask,
                       bool_t bitset, Stream *instreamp, unsigned long timeout);
-static void ifreset(pertexus_state_t *pstatep);
-static void irstr_isr(void);
-static void iwstr_isr(void);
-static void idby_isr(void);
-static void ifmk_isr(void);
-static void icer_isr(void);
-static void iher_isr(void);
-static time_t getTeensy3Time(void);
 static void cmd_echo(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_date(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_reset(cmdif_t *cmdifp, int argc, char **argv);
@@ -690,6 +687,21 @@ static unsigned int atohex(const char *strp);
 #endif
 
 
+/* Slow, rarely-called functions that exist in and run from flash */
+static FLASHMEM void gpios_init(pertexus_state_t *pstatep);
+static FLASHMEM void debug_dumpstate(pertexus_state_t *pstatep,
+                                     Stream *outstreamp);
+static FLASHMEM bool_t sdcard_init(pertexus_state_t *pstatep, Stream *streamp);
+static FLASHMEM void printDirectory(File dir, int numSpaces,
+                                    Stream *outstreamp);
+static FLASHMEM void printSpaces(int num, Stream *outstreamp);
+static FLASHMEM void printTime(const DateTimeFields tm, Stream *outstreamp,
+                               bool_t printwday, bool_t printsecs);
+static FLASHMEM void printpad(Stream *streamp, const char *strp, int padlen);
+static FLASHMEM void hexprint(Stream *outstream, unsigned int val, int ndigits);
+static FLASHMEM void hexprint32(Stream *outstream, uint32_t val, int ndigits);
+static FLASHMEM time_t getTeensy3Time(void);
+
 /* -------------------------------------------------------------------------- */
 /* Local constant data */
 
@@ -697,94 +709,95 @@ static unsigned int atohex(const char *strp);
  * Yuck.  In order to get our strings out of RAM and into
  *  PROGMEM we have to do this.
  */
-static const char _cmd_echo_name[] = "echo";
-static const char _cmd_echo_brief[] = "echo back command arguments";
 
-static const char _cmd_date_name[] = "date";
-static const char _cmd_date_brief[] = "read or change the current date/time";
+CONSTSTRDEF(_cmd_echo_name, "echo");
+static CONSTSTRDEF(_cmd_echo_brief, "echo back command arguments");
 
-static const char _cmd_fsf_name[] = "fsf";
-static const char _cmd_fsf_brief[] =
-    "skip ahead some number of filenarks";
-static const char _cmd_fsf_full[] =
+static CONSTSTRDEF(_cmd_date_name, "date");
+static CONSTSTRDEF(_cmd_date_brief, "read or change the current date/time");
+
+static CONSTSTRDEF(_cmd_fsf_name, "fsf");
+static CONSTSTRDEF(_cmd_fsf_brief,
+                    "skip ahead some number of filenarks");
+static CONSTSTRDEF(_cmd_fsf_full,
     "Usage: fsf [number-of-filemarks]\r\n"
     "\r\n"
     "Where number-of-filemarks is the number of filemarks to\r\n"
-    "skip forward.  If it is not specified it defaults to 1.\r\n";
+    "skip forward.  If it is not specified it defaults to 1.\r\n");
 
-static const char _cmd_help_name[] = "help";
-static const char _cmd_help_brief[] = "provide command help";
-static const char _cmd_help_full[] =
+static CONSTSTRDEF(_cmd_help_name, "help");
+static CONSTSTRDEF(_cmd_help_brief, "provide command help");
+static CONSTSTRDEF(_cmd_help_full,
     "Usage: help [command-name]\r\n"
     "\r\n"
     "Using 'help' by itself will print a list of\r\n"
-    "all possible commands";
+    "all possible commands");
 
-static const char _cmd_reset_name[] = "reset";
-static const char _cmd_reset_brief[] = "reset the Pertec interface";
+static CONSTSTRDEF(_cmd_reset_name, "reset");
+static CONSTSTRDEF(_cmd_reset_brief, "reset the Pertec interface");
 
-static const char _cmd_rewind_name[] = "rewind";
-static const char _cmd_rewind_brief[] = "rewind the tape";
+static CONSTSTRDEF(_cmd_rewind_name, "rewind");
+static CONSTSTRDEF(_cmd_rewind_brief, "rewind the tape");
 
-static const char _cmd_unload_name[] = "unload";
-static const char _cmd_unload_brief[] = "rewind and unload the tape";
+static CONSTSTRDEF(_cmd_unload_name, "unload");
+static CONSTSTRDEF(_cmd_unload_brief, "rewind and unload the tape");
 
-static const char _cmd_stats_name[] = "stats";
-static const char _cmd_stats_brief[] = "print out statistics";
+static CONSTSTRDEF(_cmd_stats_name, "stats");
+static CONSTSTRDEF(_cmd_stats_brief, "print out statistics");
 
-static const char _cmd_testread_name[] = "testread";
-static const char _cmd_testread_brief[] = "read test records of data";
+static CONSTSTRDEF(_cmd_testread_name, "testread");
+static CONSTSTRDEF(_cmd_testread_brief, "read test records of data");
 
-static const char _cmd_testwrite_name[] = "testwrite";
-static const char _cmd_testwrite_brief[] = "write test records of data";
+static CONSTSTRDEF(_cmd_testwrite_name, "testwrite");
+static CONSTSTRDEF(_cmd_testwrite_brief, "write test records of data");
 
-static const char _cmd_write_name[] = "write";
-static const char _cmd_write_brief[] = "write a tape image to tape";
+static CONSTSTRDEF(_cmd_write_name, "write");
+static CONSTSTRDEF(_cmd_write_brief, "write a tape image to tape");
 
-static const char _cmd_read_name[] = "read";
-static const char _cmd_read_brief[] = "read a tape image from tape";
+static CONSTSTRDEF(_cmd_read_name, "read");
+static CONSTSTRDEF(_cmd_read_brief, "read a tape image from tape");
 
-static const char _cmd_nop_name[] = "nop";
-static const char _cmd_nop_brief[] = "do a NO-OP";
+static CONSTSTRDEF(_cmd_nop_name, "nop");
+static CONSTSTRDEF(_cmd_nop_brief, "do a NO-OP");
 
-static const char _cmd_peek_name[] = "peek";
-static const char _cmd_peek_brief[] = "peek a byte";
+static CONSTSTRDEF(_cmd_peek_name, "peek");
+static CONSTSTRDEF(_cmd_peek_brief, "peek a byte");
 
-static const char _cmd_poke_name[] = "poke";
-static const char _cmd_poke_brief[] = "poke a byte";
+static CONSTSTRDEF(_cmd_poke_name, "poke");
+static CONSTSTRDEF(_cmd_poke_brief, "poke a byte");
 
-static const char _cmd_cmd_name[] = "cmd";
-static const char _cmd_cmd_brief[] = "do an aribtrary IGO command";
+static CONSTSTRDEF(_cmd_cmd_name, "cmd");
+static CONSTSTRDEF(_cmd_cmd_brief, "do an aribtrary IGO command");
 
-static const char _cmd_density_name[] = "density";
-static const char _cmd_density_brief[] = "select the drive's density";
+static CONSTSTRDEF(_cmd_density_name, "density");
+static CONSTSTRDEF(_cmd_density_brief, "select the drive's density");
 
-static const char _cmd_gpio_name[] = "gpio";
-static const char _cmd_gpio_brief[] = "diddle GPIOs to confirm wiring";
+static CONSTSTRDEF(_cmd_gpio_name, "gpio");
+static CONSTSTRDEF(_cmd_gpio_brief, "diddle GPIOs to confirm wiring");
 
-static const char _cmd_dump_name[] = "dump";
-static const char _cmd_dump_brief[] =
-    "dump out previously read tape data";
+static CONSTSTRDEF(_cmd_dump_name, "dump");
+static CONSTSTRDEF(_cmd_dump_brief,
+                    "dump out previously read tape data");
 
-static const char _cmd_play_name[] = "play";
-static const char _cmd_play_brief[] =
-    "do a series of file skips to reach end of tape";
+static CONSTSTRDEF(_cmd_play_name, "play");
+static CONSTSTRDEF(_cmd_play_brief,
+                    "do a series of file skips to reach end of tape");
 
-static const char _cmd_erase_name[] = "erase";
-static const char _cmd_erase_brief[] = "securely erase an entire tape";
+static CONSTSTRDEF(_cmd_erase_name, "erase");
+static CONSTSTRDEF(_cmd_erase_brief, "securely erase an entire tape");
 
-static const char _cmd_sd_name[] = "sd";
-static const char _cmd_sd_brief[] = "do SD commands";
+static CONSTSTRDEF(_cmd_sd_name, "sd");
+static CONSTSTRDEF(_cmd_sd_brief, "do SD commands");
 
-static const char _cmd_tapetest_name[] = "tapetest";
-static const char _cmd_tapetest_brief[] = "destructively test the medium";
+static CONSTSTRDEF(_cmd_tapetest_name, "tapetest");
+static CONSTSTRDEF(_cmd_tapetest_brief, "destructively test the medium");
 
 
 
 /*
  * The command dispatch table.
  */
-static const cmdifdisp_t cmdifdisp[] = {
+static const cmdifdisp_t cmdifdisp[] PROGMEM = {
     { &(_cmd_echo_name[0]), &(_cmd_echo_brief[0]), NULL, &cmd_echo },
     { &(_cmd_date_name[0]), &(_cmd_date_brief[0]), NULL, &cmd_date },
     { &(_cmd_gpio_name[0]), &(_cmd_gpio_brief[0]), NULL, &cmd_gpio },
@@ -820,15 +833,15 @@ static const cmdifdisp_t cmdifdisp[] = {
 /*
  * The readonly command interface data.
  */
-static const char _cmd_prompt[] = "PERTEXUS> ";
-static const char _cmd_description[] =
+static CONSTSTRDEF(_cmd_prompt, "PERTEXUS> ");
+static CONSTSTRDEF(_cmd_description,
     "This is the Pertec Magtape Interface Exerciser and Nexus (PERTEXUS)\r\n"
     "\r\n"
     "It provides a simple mechanism to directly control a\r\n"
     "magnetic tape drive attached to an Teensy 4.1\r\n"
-    "via a Pertec-type interface (two 50-pin cables)";
+   "via a Pertec-type interface (two 50-pin cables)");
 
-static const cmdifro_t cmdifro = {
+static const cmdifro_t cmdifro PROGMEM = {
     &(_cmd_prompt[0]),
     &(_cmd_description[0]),
     &(cmdifdisp[0]),
@@ -840,7 +853,7 @@ static const cmdifro_t cmdifro = {
  */
 
 
-static const gpinfo_t gpinfos[] = {
+static const gpinfo_t gpinfos[] PROGMEM = {
     GPINFO_ENTRY("IW7",      "Write data bit 7 (LSB)", GP_IW7),
     GPINFO_ENTRY("IW6",      "Write data bit 6 (LSB)", GP_IW6),
     GPINFO_ENTRY("IW5",      "Write data bit 5 (LSB)", GP_IW5),
@@ -895,6 +908,13 @@ static const gpinfo_t gpinfos[] = {
     GPINFO_ENTRY("IDEN",     "*Speed select", GP_IDEN),
 };
 
+const char daysofweek[] PROGMEM = {
+    "SunMonTueWedThuFriSat"
+};
+const char monthnames[] PROGMEM = {
+    "JanFebMarAprMayJunJulAugSepOctNovDec"
+};
+
 /* -------------------------------------------------------------------------- */
 /* Local read/write data */
 
@@ -937,18 +957,18 @@ setup(void)
     Serial.println(F(__FILE__));
     Serial.println(F("Edited " __TIMESTAMP__));
     Serial.println(F("Compiled " __DATE__ " "  __TIME__));
-    Serial.println("Starting up...");
+    Serial.println(F("Starting up..."));
     cmdif_init(&(pertexus_state.cmdif), &cmdifro, &Serial);
 
 
 #if defined(OPT_ETHERNET)
     if (Ethernet.begin(ethernet_macaddr) == 0) {
-        Serial.println("Failed to configure Ethernet using DHCP");
+        Serial.println(F("Failed to configure Ethernet using DHCP"));
         if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-            Serial.println("Ethernet shield was not found.  Sorry, can't run without hardware. :(");
+            Serial.println(F("Ethernet shield was not found.  Sorry, can't run without hardware. :("));
         }
         else if (Ethernet.linkStatus() == LinkOFF) {
-            Serial.println("Ethernet cable is not connected.");
+            Serial.println(F("Ethernet cable is not connected."));
         }
         // no point in carrying on, so do nothing forevermore:
         while (true) {
@@ -974,162 +994,7 @@ loop(void)
 
 
 /* -------------------------------------------------------------------------- */
-/* Global functions */
-
-/*
- * Initialize GPIOs
- */
-static void
-gpios_init(pertexus_state_t *pstatep)
-{
-    unsigned int        regval;
-    unsigned int        idx, ninregs, portnum;
-
-
-    /*
-     * Next, initialize the PCA9535 directions.
-     */
-    /* Clear the inverting bits */
-    portexp_writeall(pstatep, PCA9535_CMD_INV0, 0);
-    /* Set the outputs to all high */
-    portexp_writeall(pstatep, PCA9535_CMD_OUTP0, 0xff);
-    
-    for (portnum = 0; portnum < PCA9535_NPORTS; portnum++) {
-        regval = 0xff; /* Configuration: default is input */
-        
-        for (idx = 0; idx < NELEM(gpinfos); idx++) {
-            if (gpinfos[idx].group == GROUPB1
-                && gpinfos[idx].setnum == portnum) {
-                /* Controller outputs on the port expander */
-                regval &= ~(1 << gpinfos[idx].bitnum);
-            }
-        }
-        portexp_write(pstatep, PCA9535_CMD_CFG0 + portnum, regval);
-    }
-
-#if 1
-    /*
-     * Initialize all lines that go through level shifters
-     *  as inputs with weak pullups so that
-     *  when we turn on the level shifters there are defined values
-     *  for those lines that will be outputs.
-     */
-    for (idx = 0; idx < NELEM(gpinfos); idx++) {
-        if (gpinfos[idx].group == GROUPB0 || gpinfos[idx].group == GROUPA0) {
-            digitalWrite(gpinfos[idx].pinnum, HIGH);
-            pinMode(gpinfos[idx].pinnum, INPUT_PULLUP);
-        }
-    }
-#endif
-
-#if 0
-#define CHECKPOINT(s)                                                   \
-    do {                                                                \
-        int     inchar;                                                 \
-        Serial.print(F(s " hit any key to continue"));                  \
-        do {                                                            \
-            inchar = Serial.read();                                     \
-        } while (inchar < 0);                                           \
-        Serial.println();                                               \
-    } while (FALSE)
-
-    CHECKPOINT("#1");
-#else
-#define CHECKPOINT(s)
-#endif
-    
-
-#if 0
-    /*
-     * Give it 10 milliseconds to settle.  This is probably
-     *  way more time than is really needed.
-     */
-    delay(10);
-#endif
-
-    /*
-     * Now set the level shifter direction and output enable pins as outputs
-     *  and with their correct values.
-     */
-
-#if 1
-    /*
-     * Bug workaround: pinMode(, OUTPUT) does not set the value of an
-     *  output before it switches the output on.  This means that
-     *  calls to digitalWrite() before pinMode() don't actually set
-     *  the output -- they turn on the pullup.
-     * So we need to set the value by touching the DR register
-     *  (actually, via DR_SET and DR_CLEAR) first before calling
-     *  pinMode.  Yuck.
-     */
-    GP_WRITE(pstatep, GP_DIRA, 0);
-    GP_WRITE(pstatep, GP_DIRB, 1);
-    GP_WRITE(pstatep, GP_OEA, 0);
-    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
-    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
-    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
-    digitalWrite(GP_PINNUM(GP_DIRA), LOW);      /* "B to A" (inputs) */
-    digitalWrite(GP_PINNUM(GP_DIRB), HIGH);     /* "A to B" (outputs) */
-    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
-#else
-    digitalWrite(GP_PINNUM(GP_DIRA), HIGH);     /* "A to B" (outputs) */
-    digitalWrite(GP_PINNUM(GP_DIRB), LOW);     /* "A to B" (outputs) */
-    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
-    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
-    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
-    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
-#endif
-
-    CHECKPOINT("#2");
-    /*
-     * Initialize inputs
-     *  (This just turns off the now-unneeded pullup resistors)
-     */
-    ninregs = 0;
-    for (idx = 0; idx < NELEM(gpinfos); idx++) {
-        if (gpinfos[idx].group == GROUPA0) {
-            pinMode(gpinfos[idx].pinnum, INPUT);
-            ninregs++;
-        }
-    }
-    pertexus_state.ninregs = ninregs;
-
-    CHECKPOINT("#3");
-#if 1
-    /* Initialize outputs */
-    for (idx = 0; idx < NELEM(gpinfos); idx++) {
-        if (gpinfos[idx].group == GROUPB0) {
-            /*
-             * Bug workaround (see above).
-             */
-            _GP_TRADGPIO_WRITE(gpinfos[idx].setnum, gpinfos[idx].bitnum, 1);
-            pinMode(gpinfos[idx].pinnum, OUTPUT);
-            digitalWrite(gpinfos[idx].pinnum, HIGH);
-//            delay(10);
-        }
-    }
-#else
-    Serial.println(F("Hit any key to initialize each signal"));
-    for (idx = 0; idx < NELEM(gpinfos); idx++) {
-        int inchar;
-
-        if (gpinfos[idx].group == GROUPB0) {
-            Serial.print(gpinfos[idx].ifname);
-            do {
-                inchar = Serial.read();
-            } while (inchar < 0);
-            pinMode(gpinfos[idx].pinnum, OUTPUT);
-            digitalWrite(gpinfos[idx].pinnum, HIGH);
-            Serial.println();
-        }
-    }
-#endif    
-
-    CHECKPOINT("#4");
-
-    /* Set IFEN */
-    GP_WRITE(&pertexus_state, GP_IFEN, 0);
-}
+/* Static functions (FASTRUN).  These are functions that must run quickly. */
 
 /*
  * Initialize a tape record write, either a record with
@@ -1270,18 +1135,18 @@ static void
 interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
 {
     /*
-     * GPIO6: IFMK (3) 
+     * GPIO6: IFMK (3)
      * GPIO7: ICER (29), IHER (28), IWSTR (19), IRSTR (18)
      * GPIO9: IDBY (6)
      */
 
     /* Assert that ICER, IHER, IWSTR, and IRSTR are all in the same
      *  interrupt group */
-    
+
     ASSERT_CT(GP_SETNUM(GP_ICER) == GP_SETNUM(GP_IHER));
     ASSERT_CT(GP_SETNUM(GP_IHER) == GP_SETNUM(GP_IWSTR));
     ASSERT_CT(GP_SETNUM(GP_IWSTR) == GP_SETNUM(GP_IRSTR));
-    
+
     switch (iconfig) {
     case READING:
         /* IFMK: On, ICER: Off, IHER: On, IWSTR: Off, IRSTR: On, IDBY: On */
@@ -1353,533 +1218,6 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
 }
 
 /*
- * Port expander primitive functions.  Reference: [7]
- */
-
-/* Read a single byte from one of the two bytes. */
-static unsigned int
-portexp_read(pertexus_state_t *pstatep, int bytenum)
-{
-    unsigned int         retval;
-
-    pstatep->portexp->beginTransmission(PCA9535_ADDR);
-    pstatep->portexp->write(byte(bytenum));
-    pstatep->portexp->endTransmission();
-
-    pstatep->portexp->requestFrom(PCA9535_ADDR, 1);
-    if (pstatep->portexp->available() != 0) {
-        retval = (unsigned int) pstatep->portexp->read();
-    }
-    else {
-        Serial.println(F("failed to get data in time"));
-        retval = 0;
-    }
-#if 0
-    Serial.print(F("portexp_read reg "));
-    Serial.print(bytenum);
-    Serial.print(F("  0x"));
-    hexprint(&Serial, retval, 2);
-    Serial.println();
-#endif
-    return retval;
-}    
-
-/* Write a single byte from the particular register */
-static void
-portexp_write(pertexus_state_t *pstatep, unsigned int bytenum, unsigned int val)
-{
-    /* Keep the cached value */
-    pstatep->pexpregs[bytenum - PCA9535_CMD_OUTP0] = (uint8_t) val;
-
-    pstatep->portexp->beginTransmission(PCA9535_ADDR);
-    pstatep->portexp->write(byte(bytenum));
-    pstatep->portexp->write(byte(val & 0xff));
-    pstatep->portexp->endTransmission();
-}
-
-/* Write all ports from the given base register with the given value */
-static void
-portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
-                 unsigned int val)
-{
-    unsigned int         portnum;
-
-    for (portnum = 0; portnum < PCA9535_NPORTS; portnum++) {
-        portexp_write(pstatep, bytenum + portnum, val);
-    }
-}
-
-
-/*
- * Print out all of the state.
- */
-static void
-debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp)
-{
-    unsigned int         nbytes, baseoff, off;
-    uint8_t             byteval;
-    uint8_t             *baserdptr, *rdptr;
-
-    outstreamp->print(F("opstate = "));
-    outstreamp->println(pstatep->opstate, DEC);
-
-    outstreamp->print(F("fmcount = "));
-    outstreamp->println(pstatep->fmcount, DEC);
-
-    outstreamp->print(F("rdrec = "));
-    outstreamp->print(pstatep->rdrec, DEC);
-    outstreamp->print(F(", wrrec = "));
-    outstreamp->print(pstatep->wrrec, DEC);
-    outstreamp->print(F(", ISEMPTY = "));
-    outstreamp->print((int) RING_ISEMPTY(pstatep->wrrec,
-                                         pstatep->rdrec, TAPENRECS), DEC);
-    outstreamp->print(F(", ISFULL = "));
-    outstreamp->println((int) RING_ISFULL(pstatep->wrrec,
-                                         pstatep->rdrec, TAPENRECS), DEC);
-
-    outstreamp->print(F("base = 0x"));
-    hexprint32(outstreamp, (uint32_t) &(pstatep->buf[0]), 8);
-    outstreamp->print(F(", rdptr = 0x"));
-    hexprint32(outstreamp, (uint32_t) pstatep->rdptr, 8);
-    outstreamp->print(F(", wrptr = 0x"));
-    hexprint32(outstreamp, (uint32_t) pstatep->wrptr, 8);
-    outstreamp->print(F(", FREE = "));
-    outstreamp->print(RINGPTR_FREE(pstatep->wrptr,
-                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
-    outstreamp->print(F(", USED = "));
-    outstreamp->print(RINGPTR_USED(pstatep->wrptr,
-                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
-    outstreamp->print(F(", ISEMPTY = "));
-    outstreamp->print(RINGPTR_ISEMPTY(pstatep->wrptr,
-                                      pstatep->rdptr, TAPEBUFSIZ), DEC);
-    outstreamp->print(F(", ISFULL = "));
-    outstreamp->println(RINGPTR_ISFULL(pstatep->wrptr,
-                                       pstatep->rdptr, TAPEBUFSIZ), DEC);
-
-    outstreamp->print(F("harderrcount = "));
-    outstreamp->println(pstatep->harderrcount, DEC);
-
-    outstreamp->print(F("recbytes = "));
-    outstreamp->println((uint32_t) pstatep->recbytes, DEC);
-
-    outstreamp->print(F("filesdone = "));
-    outstreamp->println(pstatep->filesdone, DEC);
-
-    outstreamp->print(F("recsdone = "));
-    outstreamp->println(pstatep->recsdone, DEC);
-
-    /* print out the buffer pointers */
-    nbytes = RINGPTR_USED(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ);
-
-    /* now dump the data buffer */
-    baserdptr = pstatep->rdptr;
-    baseoff = 0;
-
-    while (baseoff < nbytes) {
-        hexprint(outstreamp, baseoff, 4);
-        outstreamp->print(F(" "));
-        hexprint32(outstreamp, (uint32_t) baserdptr, 8);
-        outstreamp->print(F(":  "));
-
-        rdptr = baserdptr;
-        /* First the hexadecimal values */
-        for (off = 0; off < 16; off++) {
-            outstreamp->print(F(" "));
-            if ((baseoff + off) < nbytes) {
-                hexprint(outstreamp, *rdptr++, 2);
-                RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
-            }
-            else {
-                outstreamp->print("  ");
-            }
-        }
-
-        outstreamp->print(F("   |"));
-        /* Now the text */
-        for (off = 0; off < 16; off++) {
-            if ((baseoff + off) < nbytes) {
-                byteval = *baserdptr++;
-
-                if (isPrintable(byteval)) {
-                    outstreamp->print((char) byteval);
-                }
-                else {
-                    outstreamp->print('.');
-                }
-                RINGPTR_WRAP(baserdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
-            }
-            else {
-                outstreamp->print(' ');
-            }
-        }
-        outstreamp->println(F("|"));
-        baseoff += 16;
-    }
-
-    /*
-     * Now dump the record buffer.
-     */
-}
-
-/*
- * Initialize the connection to the SD card.
- */
-static bool_t
-sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
-{
-    streamp->print(F("\nInitializing SD card..."));
-
-    // we'll use the initialization code from the utility libraries
-    // since we're just testing if the card is working!
-    if (!pstatep->sdp->begin(BUILTIN_SDCARD)) {
-        streamp->println(
-            F(
-"initialization failed. Things to check:\r\n"
-"* is a card inserted?\r\n"
-"* is your wiring correct?\r\n"));
-        return FALSE;
-    }
-    else {
-        streamp->println(F("Wiring is correct and a card is present."));
-    }
-#if 0
-    // print the type of card
-    streamp->println();
-    streamp->print(F("Card type:         "));
-
-    switch (pstatep->sdp->sdfs.type()) {
-    case SD_CARD_TYPE_SD1:
-        streamp->println(F("SD1"));
-        break;
-
-    case SD_CARD_TYPE_SD2:
-        streamp->println(F("SD2"));
-        break;
-
-    case SD_CARD_TYPE_SDHC:
-        streamp->println(F("SDHC"));
-        break;
-
-    default:
-        streamp->println(F("Unknown"));
-        break;
-    }
-#endif
-
-    pertexus_state.sdcardinit = TRUE;
-
-    return TRUE;
-}
-
-static void
-printDirectory(File dir, int numSpaces, Stream *outstreamp)
-{
-    File        entry;
-
-    while ((entry = dir.openNextFile())) {
-        printSpaces(numSpaces, outstreamp);
-        outstreamp->print(entry.name());
-        if (entry.isDirectory()) {
-            outstreamp->println("/");
-            printDirectory(entry, numSpaces+2, outstreamp);
-        }
-        else {
-            // files have sizes, directories do not
-            unsigned int n = log10(entry.size());
-            n = MIN(n, 10);
-            printSpaces(50 - numSpaces - strlen(entry.name()) - n,
-                        outstreamp);
-            outstreamp->print("  ");
-            outstreamp->print(entry.size(), DEC);
-            DateTimeFields datetime;
-            if (entry.getModifyTime(datetime)) {
-                printSpaces(4, outstreamp);
-                printTime(datetime, outstreamp, FALSE);
-            }
-            outstreamp->println();
-        }
-        entry.close();
-    }
-}
-
-static void
-printSpaces(int num, Stream *outstreamp)
-{
-    for (int i=0; i < num; i++) {
-        outstreamp->print(" ");
-    }
-}
-
-static void
-printTime(const DateTimeFields tm, Stream *outstreamp, bool_t printsecs)
-{
-    const char *daysofweek[7] = {
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-    };
-    const char *months[12] = {
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    };
-
-    outstreamp->print(tm.wday < 7 ? daysofweek[tm.wday] : "???");
-    outstreamp->print(' ');
-    
-    outstreamp->print(tm.mon < 12 ? months[tm.mon] : "???");
-    outstreamp->print(' ');
-
-    if (tm.mday < 10) {
-        outstreamp->print(' ');
-    }
-    outstreamp->print(tm.mday);
-    outstreamp->print(' ');
-
-    if (tm.hour < 10) {
-        outstreamp->print(' ');
-    }
-    outstreamp->print(tm.hour);
-    outstreamp->print(':');
-    if (tm.min < 10) {
-        outstreamp->print('0');
-    }
-    outstreamp->print(tm.min);
-
-    if (printsecs) {
-        outstreamp->print(':');
-        if (tm.sec < 10) {
-            outstreamp->print('0');
-        }
-        outstreamp->print(tm.sec);
-    }
-    outstreamp->print(' ');
-    outstreamp->print(tm.year + 1900);
-}
-
-/*
- * Print out a string, with optional trailing padding.
- */
-static void
-printpad(Stream *streamp, const char *strp, int padlen)
-{
-    char         strc;
-
-    while (TRUE) {
-        strc = *strp;
-        if (strc == '\0') {
-            break;
-        }
-        streamp->print(strc);
-        if (padlen > 0) {
-            padlen--;
-        }
-
-        strp++;
-    }
-
-    while (padlen > 0) {
-        streamp->print(' ');
-        padlen--;
-    }
-}
-
-/*
- * Print a hexadecimal value on outstream.  ndigits
- *  is the minimum number of digits to use.  Specify 0
- *  to use as many digits as needed.
- */
-static void
-hexprint(Stream *outstream, unsigned int val, int ndigits)
-{
-#if 1
-    /* The loop version */
-    unsigned int         mask, shift;
-
-    /* Find the first digital of the value */
-    mask = 0xf;
-    shift = 0;
-    while (--ndigits > 0 || val > mask) {
-        mask = (mask << 4) | 0xf;
-        shift += 4;
-    }
-
-    while (mask != 0) {
-        outstream->print(HEXDIGIT((val & mask) >> shift));
-        mask >>= 4;
-        shift -= 4;
-    }
-#else
-    /* Recursive version */
-    ndigits--;
-    if (ndigits > 0 || val > 0x0f) {
-        hexprint(outstream, val >> 4, ndigits);
-    }
-    outstream->print(HEXDIGIT(val));
-#endif
-}
-
-
-/*
- * Print a 32-bit hexadecimal value on outstream.  ndigits
- *  is the minimum number of digits to use.  Specify 0
- *  to use as many digits as needed.
- */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-/* This function is called from debugging code so it may
- *  not be needed.  Hence the 'pragma' */
-static void
-hexprint32(Stream *outstream, uint32_t val, int ndigits)
-{
-#if 1
-    /* The loop version */
-    uint32_t         mask;
-    unsigned int         shift;
-
-    /* Find the first digital of the value */
-    mask = 0xf;
-    shift = 0;
-    while (--ndigits > 0 || val > mask) {
-        mask = (mask << 4) | 0xf;
-        shift += 4;
-    }
-
-    while (mask != 0) {
-        outstream->print(HEXDIGIT((val & mask) >> shift));
-        mask >>= 4;
-        shift -= 4;
-    }
-#else
-    /* Recursive version */
-    ndigits--;
-    if (ndigits > 0 || val > 0x0f) {
-        hexprint32(outstream, val >> 4, ndigits);
-    }
-    outstream->print(HEXDIGIT(val));
-#endif
-}
-#pragma GCC diagnostic pop
-
-/*
- * Start a Pertec command.  The command byte is *logical*,
- *  so a 1 in a bit is actually sent as a low signal on the line.
- */
-static void
-pcmd(pertexus_state_t *pstatep, uint32_t cmdbits)
-{
-    uint32_t                 mask;
-
-    /*
-     * First, write the command byte as is, with IGO low.
-     */
-    mask = (GP_MASK(GP_IWRT) | GP_MASK(GP_IERASE)
-            | GP_MASK(GP_IWFM) | GP_MASK(GP_IEDIT)
-            | GP_MASK(GP_IREV));
-
-
-    /* "set" and "clear" here are inverted from normal use because
-     *  these are active-low signals */
-#if 0
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, (cmdbits & mask) ^ mask, 2);
-    Serial.print(F(" to *0x"));
-    hexprint32(&Serial, (uint32_t) GP_DR_SET_REG(GP_IGO), 8);
-    Serial.print(F(" (DR_SET) and 0x"));
-    hexprint(&Serial, (cmdbits & mask), 2);
-    Serial.print(F(" to *0x"));
-    hexprint32(&Serial, (uint32_t) GP_DR_CLEAR_REG(GP_IGO), 8);
-    Serial.println(F(" (DR_CLEAR)"));
-#endif
-    
-    *GP_DR_SET_REG(GP_IGO) = (cmdbits & mask) ^ mask;
-    *GP_DR_CLEAR_REG(GP_IGO) = (cmdbits & mask);
-
-    /* Wait at least 1 microsecond */
-    delayMicroseconds(5);
-
-    /* Now lower IGO */
-#if 0
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, GP_MASK(GP_IGO), 2);
-    Serial.println(F(" to DR_CLEAR (clearing IGO)"));
-#endif
-    *GP_DR_CLEAR_REG(GP_IGO) = GP_MASK(GP_IGO);
-
-    /* Wait at least 1 microsecond */
-    /* !!! bkd 2022apr04 -- delayMicroseconds() is *way* off, hence
-     *  the long period
-     *  */
-    delayMicroseconds(10);
-
-#if 0
-    /* Set the IGO line back high.  This transition causes the action
-     *  to start. */
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, GP_MASK(GP_IGO), 2);
-    Serial.println(F(" to DR_SET (setting IGO)"));
-#endif
-    *GP_DR_SET_REG(GP_IGO) = GP_MASK(GP_IGO);
-
-#if 0
-    /* Wait at least 1 microsecond */
-    delayMicroseconds(5);
-
-    /* Set everything back up again */
-    *GP_DR_SET_REG(GP_IGO) = mask;
-#endif
-}
-
-/*
- * Poll-wait for a bit to be set or clear.
- * If streamp is not NULL this will also poll for a ^C to abort.
- * Returns TRUE if the bit was set or cleared as asked for,
- * FALSE if we terminated for another reason (either ^C or timeout).
- */
-static bool_t
-bitwait(volatile uint32_t *regp, uint32_t bitmask, bool_t bitset,
-        Stream *instreamp, unsigned long timeout)
-{
-    unsigned long        start, curtime;
-    uint32_t              regval;
-    int                  inchar;
-
-    start = micros();
-
-    while (TRUE) {
-        /* Test to see if the bit has achieved the requested state */
-        regval = *regp;
-        if ((bitset && (regval & bitmask) != 0)
-            || (!bitset && (regval & bitmask) == 0)) {
-            return TRUE;
-        }
-
-        /*
-         * Was a key pressed?
-         */
-        if (instreamp != NULL
-            && (inchar = instreamp->read()) == '\03') {
-            /*
-             * We're aborting due to ^C.  Note that any other keypress
-             *  will simply be eaten and thrown away.  Well, we're on
-             *  the cheap.
-             */
-            break;
-        }
-
-        /*
-         * Has the timeout elapsed?
-         */
-        if (timeout != 0) {
-            curtime = micros();
-            if ((curtime - start) >= timeout) {
-                break;
-            }
-        }
-    }
-
-    /* We're aborting for one reason or another */
-    return FALSE;
-}
-
-/*
  * Reset the Pertec interface by deasserting (setting) IFEN and
  *  then reasserting it.
  */
@@ -1891,7 +1229,6 @@ ifreset(pertexus_state_t *pstatep)
     delayMicroseconds(5);
     GP_WRITE(pstatep, GP_IFEN, 0);
 }
-
 
 /*
  * Interrupt handlers.
@@ -1973,7 +1310,7 @@ iwstr_isr(void)
     if (pstatep->wrlwd) {
         GP_WRITE(pstatep, GP_ILWD, 0);
     }
-    
+
 
     /* Do we have a current record we're writing? */
     if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_WINREC) {
@@ -2195,7 +1532,7 @@ static void
 iher_isr(void)
 {
     pertexus_state_t        *pstatep;
- 
+
     pstatep = &pertexus_state;
 
     pstatep->harderrcount++;
@@ -2204,14 +1541,197 @@ iher_isr(void)
 #endif
 }
 
+/* -------------------------------------------------------------------------- */
+/* Static functions (NORMAL).  These are medium-speed functions that
+ *  should execute out of RAM */
+
 /*
- * Glue code to get the TimeLib to use the built-in
- *  Teensy 4.1 RTC (which for some reason is called 'Teensy3Clock').
+ * Port expander primitive functions.  Reference: [7]
  */
-static time_t
-getTeensy3Time(void)
+
+/*
+ * Read from a "port" or from both ports.  There are two
+ *  sets of GPIOs in the PCA9535: "port" 0 and "port" 1.
+ *  Each port contains 8 GPIOs, and is represented by
+ *  3 write-only registers (PCA9535_CMD_OUTPx, PCA9535_CMD_INVx,
+ *  PCA9535_CMD_CFGx) and 1 read-only register (PCA9535_CMD_INPx).
+ *
+ * This function will read from either one or both of the
+ *  PCA9535_CMD_INPx registers.
+ *
+ * A portnum value of 0 or 1 will read exactly one byte from
+ *  the PCA9535 -- the corresponding PCA9535_CMD_INPx
+ *  register.
+ *
+ * A portnum value of < 0, however, will read *both* PCA9535_CMD_INPx
+ *  registers and return a 16-bit value with PCA9535_CMD_INP0 in
+ *  the low bits and PCA9535_CMD_INP1 in the high bits.
+ */
+static unsigned int
+portexp_read(pertexus_state_t *pstatep, int portnum)
 {
-    return Teensy3Clock.get();
+    unsigned int         retval;
+
+    pstatep->portexp->beginTransmission(PCA9535_ADDR);
+    pstatep->portexp->write(byte(portnum <= 0 ?
+                                 PCA9535_CMD_INP0 : PCA9535_CMD_INP1));
+    pstatep->portexp->endTransmission();
+
+    pstatep->portexp->requestFrom(PCA9535_ADDR, portnum < 0 ? 2 : 1);
+
+    retval = (unsigned int) pstatep->portexp->read();
+
+    if (portnum < 0) {
+        retval |= (unsigned int) pstatep->portexp->read() << 8;
+    }
+
+    return retval;
+}
+
+/* Write a single byte from the particular register */
+static void
+portexp_write(pertexus_state_t *pstatep, unsigned int bytenum, unsigned int val)
+{
+    /* Keep the cached value */
+    pstatep->pexpregs[bytenum - PCA9535_CMD_OUTP0] = (uint8_t) val;
+
+    pstatep->portexp->beginTransmission(PCA9535_ADDR);
+    pstatep->portexp->write(byte(bytenum));
+    pstatep->portexp->write(byte(val & 0xff));
+    pstatep->portexp->endTransmission();
+}
+
+/* Write all ports from the given base register with the given value */
+static void
+portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
+                 unsigned int val)
+{
+    unsigned int         portnum;
+
+    for (portnum = 0; portnum < PCA9535_NPORTS; portnum++) {
+        portexp_write(pstatep, bytenum + portnum, val);
+    }
+}
+
+/*
+ * Start a Pertec command.  The command byte is *logical*,
+ *  so a 1 in a bit is actually sent as a low signal on the line.
+ */
+static void
+pcmd(pertexus_state_t *pstatep, uint32_t cmdbits)
+{
+    uint32_t                 mask;
+
+    /*
+     * First, write the command byte as is, with IGO low.
+     */
+    mask = (GP_MASK(GP_IWRT) | GP_MASK(GP_IERASE)
+            | GP_MASK(GP_IWFM) | GP_MASK(GP_IEDIT)
+            | GP_MASK(GP_IREV));
+
+
+    /* "set" and "clear" here are inverted from normal use because
+     *  these are active-low signals */
+#if 0
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, (cmdbits & mask) ^ mask, 2);
+    Serial.print(F(" to *0x"));
+    hexprint32(&Serial, (uint32_t) GP_DR_SET_REG(GP_IGO), 8);
+    Serial.print(F(" (DR_SET) and 0x"));
+    hexprint(&Serial, (cmdbits & mask), 2);
+    Serial.print(F(" to *0x"));
+    hexprint32(&Serial, (uint32_t) GP_DR_CLEAR_REG(GP_IGO), 8);
+    Serial.println(F(" (DR_CLEAR)"));
+#endif
+
+    *GP_DR_SET_REG(GP_IGO) = (cmdbits & mask) ^ mask;
+    *GP_DR_CLEAR_REG(GP_IGO) = (cmdbits & mask);
+
+    /* Wait at least 1 microsecond */
+    delayMicroseconds(5);
+
+    /* Now lower IGO */
+#if 0
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, GP_MASK(GP_IGO), 2);
+    Serial.println(F(" to DR_CLEAR (clearing IGO)"));
+#endif
+    *GP_DR_CLEAR_REG(GP_IGO) = GP_MASK(GP_IGO);
+
+    /* Wait at least 1 microsecond */
+    /* !!! bkd 2022apr04 -- delayMicroseconds() is *way* off, hence
+     *  the long period
+     *  */
+    delayMicroseconds(10);
+
+#if 0
+    /* Set the IGO line back high.  This transition causes the action
+     *  to start. */
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, GP_MASK(GP_IGO), 2);
+    Serial.println(F(" to DR_SET (setting IGO)"));
+#endif
+    *GP_DR_SET_REG(GP_IGO) = GP_MASK(GP_IGO);
+
+#if 0
+    /* Wait at least 1 microsecond */
+    delayMicroseconds(5);
+
+    /* Set everything back up again */
+    *GP_DR_SET_REG(GP_IGO) = mask;
+#endif
+}
+
+/*
+ * Poll-wait for a bit to be set or clear.
+ * If streamp is not NULL this will also poll for a ^C to abort.
+ * Returns TRUE if the bit was set or cleared as asked for,
+ * FALSE if we terminated for another reason (either ^C or timeout).
+ */
+static bool_t
+bitwait(volatile uint32_t *regp, uint32_t bitmask, bool_t bitset,
+        Stream *instreamp, unsigned long timeout)
+{
+    unsigned long        start, curtime;
+    uint32_t              regval;
+    int                  inchar;
+
+    start = micros();
+
+    while (TRUE) {
+        /* Test to see if the bit has achieved the requested state */
+        regval = *regp;
+        if ((bitset && (regval & bitmask) != 0)
+            || (!bitset && (regval & bitmask) == 0)) {
+            return TRUE;
+        }
+
+        /*
+         * Was a key pressed?
+         */
+        if (instreamp != NULL
+            && (inchar = instreamp->read()) == '\03') {
+            /*
+             * We're aborting due to ^C.  Note that any other keypress
+             *  will simply be eaten and thrown away.  Well, we're on
+             *  the cheap.
+             */
+            break;
+        }
+
+        /*
+         * Has the timeout elapsed?
+         */
+        if (timeout != 0) {
+            curtime = micros();
+            if ((curtime - start) >= timeout) {
+                break;
+            }
+        }
+    }
+
+    /* We're aborting for one reason or another */
+    return FALSE;
 }
 
 /*
@@ -2262,34 +1782,34 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
             ntmp[1] = *sp++;
             val = atoi(ntmp);
             if (val < 1 || val > 12) {
-                errstr = "invalid month";
+                errstr = PSTR("invalid month");
                 goto usage;
             }
             set_tm.mon = val - 1;
-            
+
             ntmp[0] = *sp++;
             ntmp[1] = *sp++;
             val = atoi(ntmp);
             if (val < 1 || val > 31) {
-                errstr = "invalid date of month";
+                errstr = PSTR("invalid date of month");
                 goto usage;
             }
             set_tm.mday = val;
-            
+
             ntmp[0] = *sp++;
             ntmp[1] = *sp++;
             val = atoi(ntmp);
             if (val < 0 || val > 23) {
-                errstr = "invalid hour";
+                errstr = PSTR("invalid hour");
                 goto usage;
             }
             set_tm.hour = val;
-            
+
             ntmp[0] = *sp++;
             ntmp[1] = *sp++;
             val = atoi(ntmp);
             if (val < 0 || val > 59) {
-                errstr = "invalid minute";
+                errstr = PSTR("invalid minute");
                 goto usage;
             }
             set_tm.min = val;
@@ -2314,7 +1834,7 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
                         val += (set_tm.year - (set_tm.year%100));
 
                         if (val < 70 || val > 206) {
-                            errstr = "2 digit year out of range";
+                            errstr = PSTR("2 digit year out of range");
                         }
 
                         set_tm.year = val;
@@ -2326,18 +1846,18 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
                         ntmp[2] = *sp++;
                         ntmp[3] = *sp++;
                         ntmp[4] = '\0';
-                        
+
                         val = atoi(ntmp);
 
                         if (val < 1970 || val > 2106) {
-                            errstr = "4 digit year out of range";
+                            errstr = PSTR("4 digit year out of range");
                         }
-                        
+
                         set_tm.year = val - 1900;
                         slen -= 4;
                     }
                     else {
-                        errstr = "wrong year length";
+                        errstr = PSTR("wrong year length");
                         goto usage;
                     }
                 }
@@ -2345,7 +1865,7 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
                     sp++;
                     slen--;
                     if (slen != 2) {
-                        errstr = "seconds must be 2 digits";
+                        errstr = PSTR("seconds must be 2 digits");
                         goto usage;
                     }
                     ntmp[0] = *sp++;
@@ -2355,7 +1875,7 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
                     val = atoi(ntmp);
 
                     if (val < 0 || val > 59) {
-                        errstr = "invalid seconds";
+                        errstr = PSTR("invalid seconds");
                         goto usage;
                     }
 
@@ -2364,7 +1884,7 @@ cmd_date(cmdif_t *cmdifp, int argc, char **argv)
             }
 
             set_tm.wday = 7;        /* invalid, on purpose */
-            
+
             settime = makeTime(set_tm);
             Teensy3Clock.set(settime);
             setTime(settime);
@@ -2381,11 +1901,11 @@ usage:
             return;
         }
     }
-                
+
     nowtime = now();
     breakTime(nowtime, now_tm);
 
-    printTime(now_tm, outstreamp, TRUE);
+    printTime(now_tm, outstreamp, TRUE, TRUE);
     outstreamp->println();
 }
 
@@ -2608,7 +2128,7 @@ cmd_write(cmdif_t *cmdifp, int argc, char **argv)
         return;
     }
 
-    if (strcmp(argv[1], "-pattern") == 0) {
+    if (strcmp_P(argv[1], PSTR("-pattern")) == 0) {
         pattern = TRUE;
         patrecsleft = 100;
     }
@@ -2940,7 +2460,7 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
         return;
     }
 
-    if (strcmp(argv[1], "-") == 0) {
+    if (strcmp_P(argv[1], PSTR("-")) == 0) {
         nofile = TRUE;
     }
     else {
@@ -3030,6 +2550,7 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
                  *  but we haven't finished it.
                  */
                 trp = NULL;
+                reclen = 0;     /* eliminate compiler warning */
                 writesize = RINGPTR_USED(wrptr, rdptr, TAPEBUFSIZ);
             }
             else {
@@ -3358,7 +2879,7 @@ cmd_unload(cmdif_t *cmdifp, int argc, char **argv)
 
     GP_WRITE(pstatep, GP_IOFL, 0);      /* Make active */
     delayMicroseconds(5);
-    GP_WRITE(pstatep, GP_IOFL, 1); 
+    GP_WRITE(pstatep, GP_IOFL, 1);
 }
 
 static void
@@ -3414,7 +2935,7 @@ cmd_testread(cmdif_t *cmdifp, int argc, char **argv)
 
     for (idx = 1; idx < argc; idx++) {
         if (*argv[idx] == '-') {
-            if (strcmp(argv[idx], "-nrecs") == 0) {
+            if (strcmp_P(argv[idx], PSTR("-nrecs")) == 0) {
                 if ((argc - idx) < 2) {
                     streamp->println(F("-nrecs must be followed by a value"));
                     goto usage;
@@ -3425,7 +2946,7 @@ cmd_testread(cmdif_t *cmdifp, int argc, char **argv)
                 }
                 idx++;
             }
-            else if (strcmp(argv[idx], "-nfiles") == 0) {
+            else if (strcmp_P(argv[idx], PSTR("-nfiles")) == 0) {
                 if ((argc - idx) < 2) {
                     streamp->println(F("-nfiles must be followed by a value"));
                     goto usage;
@@ -3436,7 +2957,7 @@ cmd_testread(cmdif_t *cmdifp, int argc, char **argv)
                 }
                 idx++;
             }
-            else if (strcmp(argv[idx], "-reverse") == 0) {
+            else if (strcmp_P(argv[idx], PSTR("-reverse")) == 0) {
                 reverse = TRUE;
             }
             else {
@@ -3610,18 +3131,18 @@ cmd_gpio(cmdif_t *cmdifp, int argc, char **argv)
     asinputs = TRUE;
     forcemode = FALSE;
     if (argc > 1) {
-        if (strcmp(argv[1], "-forcein") == 0) {
+        if (strcmp_P(argv[1], PSTR("-forcein")) == 0) {
             asinputs = TRUE;
             forcemode = TRUE;
         }
-        else if (strcmp(argv[1], "-forceout") == 0) {
+        else if (strcmp_P(argv[1], PSTR("-forceout")) == 0) {
             asinputs = FALSE;
             forcemode = TRUE;
         }
-        else if (strcmp(argv[1], "-out") == 0) {
+        else if (strcmp_P(argv[1], PSTR("-out")) == 0) {
             asinputs = FALSE;
         }
-        else if (strcmp(argv[1], "-init") == 0) {
+        else if (strcmp_P(argv[1], PSTR("-init")) == 0) {
             init = TRUE;
         }
         else {
@@ -3678,7 +3199,7 @@ cmd_gpio(cmdif_t *cmdifp, int argc, char **argv)
     }
 
     for (idx = 0; idx < PCA9535_NPORTS; idx++) {
-        regval = portexp_read(pstatep, PCA9535_CMD_INP0 + idx);
+        regval = portexp_read(pstatep, idx);
         streamp->print(F("INP"));
         streamp->print(idx);
         streamp->print(F("   0x"));
@@ -3706,7 +3227,7 @@ cmd_gpio(cmdif_t *cmdifp, int argc, char **argv)
                                            - PCA9535_CMD_OUTP0], 2);
         streamp->println();
     }
-    
+
     goingup = TRUE;
     prevpinval = 0;     /* dummy to nuke compiler whining */
     lasttime = 0;
@@ -3881,15 +3402,15 @@ usage:
         return;
     }
 
-    if (strcmp(argv[1], "init") == 0) {
+    if (strcmp_P(argv[1], PSTR("init")) == 0) {
         (void) sdcard_init(pstatep, streamp);
     }
-    else if (strcmp(argv[1], "dir") == 0) {
-        File root = pstatep->sdp->open("/");
+    else if (strcmp_P(argv[1], PSTR("dir")) == 0) {
+        File root = pstatep->sdp->open(PSTR("/"));
         /* !!!???error check */
         printDirectory(root, 0, streamp);
     }
-    else if (strcmp(argv[1], "read") == 0) {
+    else if (strcmp_P(argv[1], PSTR("read")) == 0) {
         File          readfile;
         uint32_t        header, footer, reclen;
         unsigned long   nbytes, nrecs;
@@ -3981,4 +3502,528 @@ usage:
         goto usage;
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Static functions (FLASHMEM).  These are low-use functions that can
+ *  exist entirely in slow-access flash */
+
+/*
+ * Initialize GPIOs
+ */
+static void
+gpios_init(pertexus_state_t *pstatep)
+{
+    unsigned int        regval;
+    unsigned int        idx, ninregs, portnum;
+
+
+    /*
+     * Next, initialize the PCA9535 directions.
+     */
+    /* Clear the inverting bits */
+    portexp_writeall(pstatep, PCA9535_CMD_INV0, 0);
+    /* Set the outputs to all high */
+    portexp_writeall(pstatep, PCA9535_CMD_OUTP0, 0xff);
+
+    for (portnum = 0; portnum < PCA9535_NPORTS; portnum++) {
+        regval = 0xff; /* Configuration: default is input */
+
+        for (idx = 0; idx < NELEM(gpinfos); idx++) {
+            if (gpinfos[idx].group == GROUPB1
+                && gpinfos[idx].setnum == portnum) {
+                /* Controller outputs on the port expander */
+                regval &= ~(1 << gpinfos[idx].bitnum);
+            }
+        }
+        portexp_write(pstatep, PCA9535_CMD_CFG0 + portnum, regval);
+    }
+
+#if 1
+    /*
+     * Initialize all lines that go through level shifters
+     *  as inputs with weak pullups so that
+     *  when we turn on the level shifters there are defined values
+     *  for those lines that will be outputs.
+     */
+    for (idx = 0; idx < NELEM(gpinfos); idx++) {
+        if (gpinfos[idx].group == GROUPB0 || gpinfos[idx].group == GROUPA0) {
+            digitalWrite(gpinfos[idx].pinnum, HIGH);
+            pinMode(gpinfos[idx].pinnum, INPUT_PULLUP);
+        }
+    }
+#endif
+
+#if 0
+#define CHECKPOINT(s)                                                   \
+    do {                                                                \
+        int     inchar;                                                 \
+        Serial.print(F(s " hit any key to continue"));                  \
+        do {                                                            \
+            inchar = Serial.read();                                     \
+        } while (inchar < 0);                                           \
+        Serial.println();                                               \
+    } while (FALSE)
+
+    CHECKPOINT("#1");
+#else
+#define CHECKPOINT(s)
+#endif
+
+
+#if 0
+    /*
+     * Give it 10 milliseconds to settle.  This is probably
+     *  way more time than is really needed.
+     */
+    delay(10);
+#endif
+
+    /*
+     * Now set the level shifter direction and output enable pins as outputs
+     *  and with their correct values.
+     */
+
+#if 1
+    /*
+     * Bug workaround: pinMode(, OUTPUT) does not set the value of an
+     *  output before it switches the output on.  This means that
+     *  calls to digitalWrite() before pinMode() don't actually set
+     *  the output -- they turn on the pullup.
+     * So we need to set the value by touching the DR register
+     *  (actually, via DR_SET and DR_CLEAR) first before calling
+     *  pinMode.  Yuck.
+     */
+    GP_WRITE(pstatep, GP_DIRA, 0);
+    GP_WRITE(pstatep, GP_DIRB, 1);
+    GP_WRITE(pstatep, GP_OEA, 0);
+    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
+    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
+    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
+    digitalWrite(GP_PINNUM(GP_DIRA), LOW);      /* "B to A" (inputs) */
+    digitalWrite(GP_PINNUM(GP_DIRB), HIGH);     /* "A to B" (outputs) */
+    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
+#else
+    digitalWrite(GP_PINNUM(GP_DIRA), HIGH);     /* "A to B" (outputs) */
+    digitalWrite(GP_PINNUM(GP_DIRB), LOW);     /* "A to B" (outputs) */
+    digitalWrite(GP_PINNUM(GP_OEA), LOW);       /* enable */
+    pinMode(GP_PINNUM(GP_DIRA), OUTPUT);
+    pinMode(GP_PINNUM(GP_DIRB), OUTPUT);
+    pinMode(GP_PINNUM(GP_OEA), OUTPUT);
+#endif
+
+    CHECKPOINT("#2");
+    /*
+     * Initialize inputs
+     *  (This just turns off the now-unneeded pullup resistors)
+     */
+    ninregs = 0;
+    for (idx = 0; idx < NELEM(gpinfos); idx++) {
+        if (gpinfos[idx].group == GROUPA0) {
+            pinMode(gpinfos[idx].pinnum, INPUT);
+            ninregs++;
+        }
+    }
+    pertexus_state.ninregs = ninregs;
+
+    CHECKPOINT("#3");
+#if 1
+    /* Initialize outputs */
+    for (idx = 0; idx < NELEM(gpinfos); idx++) {
+        if (gpinfos[idx].group == GROUPB0) {
+            /*
+             * Bug workaround (see above).
+             */
+            _GP_TRADGPIO_WRITE(gpinfos[idx].setnum, gpinfos[idx].bitnum, 1);
+            pinMode(gpinfos[idx].pinnum, OUTPUT);
+            digitalWrite(gpinfos[idx].pinnum, HIGH);
+//            delay(10);
+        }
+    }
+#else
+    Serial.println(F("Hit any key to initialize each signal"));
+    for (idx = 0; idx < NELEM(gpinfos); idx++) {
+        int inchar;
+
+        if (gpinfos[idx].group == GROUPB0) {
+            Serial.print(gpinfos[idx].ifname);
+            do {
+                inchar = Serial.read();
+            } while (inchar < 0);
+            pinMode(gpinfos[idx].pinnum, OUTPUT);
+            digitalWrite(gpinfos[idx].pinnum, HIGH);
+            Serial.println();
+        }
+    }
+#endif
+
+    CHECKPOINT("#4");
+
+    /* Set IFEN */
+    GP_WRITE(&pertexus_state, GP_IFEN, 0);
+}
+
+
+/*
+ * Print out all of the state.
+ */
+static void
+debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp)
+{
+    unsigned int         nbytes, baseoff, off;
+    uint8_t             byteval;
+    uint8_t             *baserdptr, *rdptr;
+
+    outstreamp->print(F("opstate = "));
+    outstreamp->println(pstatep->opstate, DEC);
+
+    outstreamp->print(F("fmcount = "));
+    outstreamp->println(pstatep->fmcount, DEC);
+
+    outstreamp->print(F("rdrec = "));
+    outstreamp->print(pstatep->rdrec, DEC);
+    outstreamp->print(F(", wrrec = "));
+    outstreamp->print(pstatep->wrrec, DEC);
+    outstreamp->print(F(", ISEMPTY = "));
+    outstreamp->print((int) RING_ISEMPTY(pstatep->wrrec,
+                                         pstatep->rdrec, TAPENRECS), DEC);
+    outstreamp->print(F(", ISFULL = "));
+    outstreamp->println((int) RING_ISFULL(pstatep->wrrec,
+                                         pstatep->rdrec, TAPENRECS), DEC);
+
+    outstreamp->print(F("base = 0x"));
+    hexprint32(outstreamp, (uint32_t) &(pstatep->buf[0]), 8);
+    outstreamp->print(F(", rdptr = 0x"));
+    hexprint32(outstreamp, (uint32_t) pstatep->rdptr, 8);
+    outstreamp->print(F(", wrptr = 0x"));
+    hexprint32(outstreamp, (uint32_t) pstatep->wrptr, 8);
+    outstreamp->print(F(", FREE = "));
+    outstreamp->print(RINGPTR_FREE(pstatep->wrptr,
+                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", USED = "));
+    outstreamp->print(RINGPTR_USED(pstatep->wrptr,
+                                   pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", ISEMPTY = "));
+    outstreamp->print(RINGPTR_ISEMPTY(pstatep->wrptr,
+                                      pstatep->rdptr, TAPEBUFSIZ), DEC);
+    outstreamp->print(F(", ISFULL = "));
+    outstreamp->println(RINGPTR_ISFULL(pstatep->wrptr,
+                                       pstatep->rdptr, TAPEBUFSIZ), DEC);
+
+    outstreamp->print(F("harderrcount = "));
+    outstreamp->println(pstatep->harderrcount, DEC);
+
+    outstreamp->print(F("recbytes = "));
+    outstreamp->println((uint32_t) pstatep->recbytes, DEC);
+
+    outstreamp->print(F("filesdone = "));
+    outstreamp->println(pstatep->filesdone, DEC);
+
+    outstreamp->print(F("recsdone = "));
+    outstreamp->println(pstatep->recsdone, DEC);
+
+    /* print out the buffer pointers */
+    nbytes = RINGPTR_USED(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ);
+
+    /* now dump the data buffer */
+    baserdptr = pstatep->rdptr;
+    baseoff = 0;
+
+    while (baseoff < nbytes) {
+        hexprint(outstreamp, baseoff, 4);
+        outstreamp->print(F(" "));
+        hexprint32(outstreamp, (uint32_t) baserdptr, 8);
+        outstreamp->print(F(":  "));
+
+        rdptr = baserdptr;
+        /* First the hexadecimal values */
+        for (off = 0; off < 16; off++) {
+            outstreamp->print(F(" "));
+            if ((baseoff + off) < nbytes) {
+                hexprint(outstreamp, *rdptr++, 2);
+                RINGPTR_WRAP(rdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            }
+            else {
+                outstreamp->print(F("  "));
+            }
+        }
+
+        outstreamp->print(F("   |"));
+        /* Now the text */
+        for (off = 0; off < 16; off++) {
+            if ((baseoff + off) < nbytes) {
+                byteval = *baserdptr++;
+
+                if (isPrintable(byteval)) {
+                    outstreamp->print((char) byteval);
+                }
+                else {
+                    outstreamp->print('.');
+                }
+                RINGPTR_WRAP(baserdptr, &(pstatep->buf[0]), TAPEBUFSIZ);
+            }
+            else {
+                outstreamp->print(' ');
+            }
+        }
+        outstreamp->println(F("|"));
+        baseoff += 16;
+    }
+
+    /*
+     * Now dump the record buffer.
+     */
+}
+
+/*
+ * Initialize the connection to the SD card.
+ */
+static bool_t
+sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
+{
+    streamp->print(F("\nInitializing SD card..."));
+
+    // we'll use the initialization code from the utility libraries
+    // since we're just testing if the card is working!
+    if (!pstatep->sdp->begin(BUILTIN_SDCARD)) {
+        streamp->println(
+            F(
+"initialization failed. Things to check:\r\n"
+"* is a card inserted?\r\n"
+"* is your wiring correct?\r\n"));
+        return FALSE;
+    }
+    else {
+        streamp->println(F("Wiring is correct and a card is present."));
+    }
+#if 0
+    // print the type of card
+    streamp->println();
+    streamp->print(F("Card type:         "));
+
+    switch (pstatep->sdp->sdfs.type()) {
+    case SD_CARD_TYPE_SD1:
+        streamp->println(F("SD1"));
+        break;
+
+    case SD_CARD_TYPE_SD2:
+        streamp->println(F("SD2"));
+        break;
+
+    case SD_CARD_TYPE_SDHC:
+        streamp->println(F("SDHC"));
+        break;
+
+    default:
+        streamp->println(F("Unknown"));
+        break;
+    }
+#endif
+
+    pertexus_state.sdcardinit = TRUE;
+
+    return TRUE;
+}
+
+static void
+printDirectory(File dir, int numSpaces, Stream *outstreamp)
+{
+    File        entry;
+
+    while ((entry = dir.openNextFile())) {
+        printSpaces(numSpaces, outstreamp);
+        outstreamp->print(entry.name());
+        if (entry.isDirectory()) {
+            outstreamp->println(F("/"));
+            printDirectory(entry, numSpaces+2, outstreamp);
+        }
+        else {
+            // files have sizes, directories do not
+            unsigned int n = log10(entry.size());
+            n = MIN(n, 10);
+            printSpaces(50 - numSpaces - strlen(entry.name()) - n + 2,
+                        outstreamp);
+            outstreamp->print(entry.size(), DEC);
+            DateTimeFields datetime;
+            if (entry.getModifyTime(datetime)) {
+                printSpaces(4, outstreamp);
+                printTime(datetime, outstreamp, FALSE, FALSE);
+            }
+            outstreamp->println();
+        }
+        entry.close();
+    }
+}
+
+static void
+printSpaces(int num, Stream *outstreamp)
+{
+    for (int i=0; i < num; i++) {
+        outstreamp->print(' ');
+    }
+}
+
+static void
+printTime(const DateTimeFields tm, Stream *outstreamp,
+          bool_t printwday, bool_t printsecs)
+{
+    if (printwday) {
+        if (tm.wday >= 7) {
+            outstreamp->print(F("???"));
+        }
+        else {
+            outstreamp->write(&(daysofweek[tm.wday*3]), 3);
+        }
+        outstreamp->print(' ');
+    }
+
+    if (tm.mon >= 12) {
+        outstreamp->print(F("???"));
+    }
+    else {
+        outstreamp->write(&(monthnames[tm.mon*3]), 3);
+    }
+    outstreamp->print(' ');
+
+    if (tm.mday < 10) {
+        outstreamp->print(' ');
+    }
+    outstreamp->print(tm.mday);
+    outstreamp->print(' ');
+
+    if (tm.hour < 10) {
+        outstreamp->print(' ');
+    }
+    outstreamp->print(tm.hour);
+    outstreamp->print(':');
+    if (tm.min < 10) {
+        outstreamp->print('0');
+    }
+    outstreamp->print(tm.min);
+
+    if (printsecs) {
+        outstreamp->print(':');
+        if (tm.sec < 10) {
+            outstreamp->print('0');
+        }
+        outstreamp->print(tm.sec);
+    }
+    outstreamp->print(' ');
+    outstreamp->print(tm.year + 1900);
+}
+
+/*
+ * Print out a string, with optional trailing padding.
+ */
+static void
+printpad(Stream *streamp, const char *strp, int padlen)
+{
+    char         strc;
+
+    while (TRUE) {
+        strc = *strp;
+        if (strc == '\0') {
+            break;
+        }
+        streamp->print(strc);
+        if (padlen > 0) {
+            padlen--;
+        }
+
+        strp++;
+    }
+
+    while (padlen > 0) {
+        streamp->print(' ');
+        padlen--;
+    }
+}
+
+/*
+ * Print a hexadecimal value on outstream.  ndigits
+ *  is the minimum number of digits to use.  Specify 0
+ *  to use as many digits as needed.
+ */
+static void
+hexprint(Stream *outstream, unsigned int val, int ndigits)
+{
+#if 1
+    /* The loop version */
+    unsigned int         mask, shift;
+
+    /* Find the first digital of the value */
+    mask = 0xf;
+    shift = 0;
+    while (--ndigits > 0 || val > mask) {
+        mask = (mask << 4) | 0xf;
+        shift += 4;
+    }
+
+    while (mask != 0) {
+        outstream->print(HEXDIGIT((val & mask) >> shift));
+        mask >>= 4;
+        shift -= 4;
+    }
+#else
+    /* Recursive version */
+    ndigits--;
+    if (ndigits > 0 || val > 0x0f) {
+        hexprint(outstream, val >> 4, ndigits);
+    }
+    outstream->print(HEXDIGIT(val));
+#endif
+}
+
+
+/*
+ * Print a 32-bit hexadecimal value on outstream.  ndigits
+ *  is the minimum number of digits to use.  Specify 0
+ *  to use as many digits as needed.
+ */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+/* This function is called from debugging code so it may
+ *  not be needed.  Hence the 'pragma' */
+static void
+hexprint32(Stream *outstream, uint32_t val, int ndigits)
+{
+#if 1
+    /* The loop version */
+    uint32_t         mask;
+    unsigned int         shift;
+
+    /* Find the first digital of the value */
+    mask = 0xf;
+    shift = 0;
+    while (--ndigits > 0 || val > mask) {
+        mask = (mask << 4) | 0xf;
+        shift += 4;
+    }
+
+    while (mask != 0) {
+        outstream->print(HEXDIGIT((val & mask) >> shift));
+        mask >>= 4;
+        shift -= 4;
+    }
+#else
+    /* Recursive version */
+    ndigits--;
+    if (ndigits > 0 || val > 0x0f) {
+        hexprint32(outstream, val >> 4, ndigits);
+    }
+    outstream->print(HEXDIGIT(val));
+#endif
+}
+#pragma GCC diagnostic pop
+
+
+/*
+ * Glue code to get the TimeLib to use the built-in
+ *  Teensy 4.1 RTC (which for some reason is called 'Teensy3Clock').
+ */
+static time_t
+getTeensy3Time(void)
+{
+    return Teensy3Clock.get();
+}
+
 

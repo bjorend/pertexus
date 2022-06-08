@@ -34,4 +34,5 @@ CFLAGS_CPP=-O2 -g -Wall -ffunction-sections -fdata-sections -nostdlib \
 pertexusfw.dmp: $(TEMPDIR)/pertexusfw.ino.elf
 #	$(AVROBJDUMP) -hxasdt -lS -C "$(shell cygpath -w $<)" > $@
 	$(ARMOBJDUMP) -hxasdt -C "$(shell cygpath -w $<)" > $@
-	$(ARMNM) --demangle --numeric-sort "$(shell cygpath -w $<)" >> $@
+	$(ARMNM) --print-size --demangle --numeric-sort \
+			    "$(shell cygpath -w $<)" >> $@
