@@ -348,8 +348,8 @@ ASSERT_CT(GP_SETNUM(GP_IREV) == GP_SETNUM(GP_IGO));
 
 #define GP_MAXINREGS      4       /* number of input registers */
 
-#define TAPEBUFSIZ      4096
-#define TAPENRECS       8           /* must be a power of two */
+#define TAPEBUFSIZ      32768
+#define TAPENRECS       16           /* must be a power of two */
 
 
 /* Define a string of name n with value s which will be in cheap memory */
@@ -575,17 +575,18 @@ typedef struct _pertexus_state {
 #define PERTEXUS_STATE_OPSTATE_IDLE           0
 #define PERTEXUS_STATE_OPSTATE_ERRWAIT        1
 #define PERTEXUS_STATE_OPSTATE_ERROR          2
+#define PERTEXUS_STATE_OPSTATE_EOT            3
     /* write states */
-#define PERTEXUS_STATE_OPSTATE_WRECSTART      3
-#define PERTEXUS_STATE_OPSTATE_WINREC         4
-#define PERTEXUS_STATE_OPSTATE_WRECDONE       5
-#define PERTEXUS_STATE_OPSTATE_WFMWAIT        6
+#define PERTEXUS_STATE_OPSTATE_WRECSTART      4
+#define PERTEXUS_STATE_OPSTATE_WINREC         5
+#define PERTEXUS_STATE_OPSTATE_WRECDONE       6
+#define PERTEXUS_STATE_OPSTATE_WFMWAIT        7
     /* read states */
-#define PERTEXUS_STATE_OPSTATE_RPAUSED        7
-#define PERTEXUS_STATE_OPSTATE_RSTART         8
-#define PERTEXUS_STATE_OPSTATE_RINREC         9
-#define PERTEXUS_STATE_OPSTATE_RFMSEEN        10
-#define PERTEXUS_STATE_OPSTATE_ROVERRUN       11
+#define PERTEXUS_STATE_OPSTATE_RPAUSED        8
+#define PERTEXUS_STATE_OPSTATE_RSTART         9
+#define PERTEXUS_STATE_OPSTATE_RINREC         10
+#define PERTEXUS_STATE_OPSTATE_RFMSEEN        11
+#define PERTEXUS_STATE_OPSTATE_ROVERRUN       12
 
     uint8_t          fmcount;       /* consecutive filemark count */
     volatile uint8_t         rdrec, wrrec;
@@ -601,11 +602,13 @@ typedef struct _pertexus_state {
         unsigned long        irstr;
         unsigned long        idby;
         unsigned long        ifmk;
+        unsigned long        ieot;
     } intcounts;
 #endif      /* defined(OPT_INTCOUNTS) */
+    int             filesleft;
     unsigned int    filesdone;
     unsigned int    recsdone;
-    tape_rec_t     taperecs[TAPENRECS];
+    tape_rec_t      taperecs[TAPENRECS];
     uint8_t         buf[TAPEBUFSIZ];
     uint8_t         wrnextbyte;
     bool_t          wrlwd;
@@ -633,17 +636,19 @@ typedef enum {
 /* Functions that must run very quickly */
 static FASTRUN inline void writerecstart(pertexus_state_t *pstatep);
 static inline void readrecstart(pertexus_state_t *pstatep);
-static inline void readrecfinish(pertexus_state_t *pstatep);
+static inline void readrecfinish(pertexus_state_t *pstatep, bool_t eof);
 static FASTRUN void interrupts_init(pertexus_state_t *pstatep);
 static FASTRUN void interrupts_set(pertexus_state_t *pstatep,
                                    interrupt_config_t iconfig);
 static FASTRUN void ifreset(pertexus_state_t *pstatep);
+static FASTRUN void pcmd(pertexus_state_t *pstatep, uint32_t cmdbits);
 static FASTRUN void irstr_isr(void);
 static FASTRUN void iwstr_isr(void);
 static FASTRUN void idby_isr(void);
 static FASTRUN void ifmk_isr(void);
 static FASTRUN void icer_isr(void);
 static FASTRUN void iher_isr(void);
+static FASTRUN void ieot_isr(void);
 
 /* Medium-speed functions */
 static unsigned int portexp_read(pertexus_state_t *pstatep, int portnum);
@@ -651,7 +656,6 @@ static void portexp_write(pertexus_state_t *pstatep, unsigned int bytenum,
                           unsigned int val);
 static void portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
                              unsigned int val);
-static void pcmd(pertexus_state_t *pstatep, uint32_t cmdbits);
 static bool_t bitwait(volatile uint32_t *regp, uint32_t bitmask,
                       bool_t bitset, Stream *instreamp, unsigned long timeout);
 static void cmd_echo(cmdif_t *cmdifp, int argc, char **argv);
@@ -669,6 +673,7 @@ static void cmd_density(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_testread(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_gpio(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_sd(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_erase(cmdif_t *cmdifp, int argc, char **argv);
 
 #if 0
 static void cmd_cmd(cmdif_t *cmdifp, int argc, char **argv);
@@ -676,7 +681,6 @@ static void cmd_peek(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_poke(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_dump(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_play(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_erase(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_tapetest(cmdif_t *cmdifp, int argc, char **argv);
 static void gp_inreads(uint8_t *valp);
 static bool_t gp_inchanges(const uint8_t *valp,
@@ -792,8 +796,6 @@ static CONSTSTRDEF(_cmd_sd_brief, "do SD commands");
 static CONSTSTRDEF(_cmd_tapetest_name, "tapetest");
 static CONSTSTRDEF(_cmd_tapetest_brief, "destructively test the medium");
 
-
-
 /*
  * The command dispatch table.
  */
@@ -818,13 +820,13 @@ static const cmdifdisp_t cmdifdisp[] PROGMEM = {
       NULL, &cmd_testwrite },
     { &(_cmd_write_name[0]), &(_cmd_write_brief[0]), NULL, &cmd_write },
     { &(_cmd_read_name[0]), &(_cmd_read_brief[0]), NULL, &cmd_read },
+    { &(_cmd_erase_name[0]), &(_cmd_erase_brief[0]), NULL, &cmd_erase },
 #if 0
     { &(_cmd_peek_name[0]), &(_cmd_peek_brief[0]), NULL, &cmd_peek },
     { &(_cmd_poke_name[0]), &(_cmd_poke_brief[0]), NULL, &cmd_poke },
     { &(_cmd_cmd_name[0]), &(_cmd_cmd_brief[0]), NULL, &cmd_cmd },
     { &(_cmd_dump_name[0]), &(_cmd_dump_brief[0]), NULL, &cmd_dump },
     { &(_cmd_play_name[0]), &(_cmd_play_brief[0]), NULL, &cmd_play },
-    { &(_cmd_erase_name[0]), &(_cmd_erase_brief[0]), NULL, &cmd_erase },
     { &(_cmd_tapetest_name[0]), &(_cmd_tapetest_brief[0]),
       NULL, &cmd_tapetest },
 #endif
@@ -1068,7 +1070,7 @@ readrecstart(pertexus_state_t *pstatep)
  *  PERTEXUS_STATE_OPSTATE_RFMSEEN.
  */
 static inline void
-readrecfinish(pertexus_state_t *pstatep)
+readrecfinish(pertexus_state_t *pstatep, bool_t eof)
 {
     uint8_t          wrrec;
 
@@ -1087,12 +1089,38 @@ readrecfinish(pertexus_state_t *pstatep)
     NONATOMIC_INCR1_MOD(wrrec, TAPENRECS);
     pstatep->wrrec = wrrec;
 
+    if (eof && pstatep->filesleft > 0) {
+        pstatep->filesleft--;
+    }
+
+
     /*
      * Have we seen consecutive filemarks?
      */
-    if (pstatep->fmcount > 1) {
+    if (eof
+        && (pstatep->filesleft == 0
+            || (pstatep->filesleft == -2 && pstatep->fmcount > 1))) {
+
         /*
-         * We interpret this as the end of the tape.
+         * We've seen an EOF (IFMK) and we've either reached our
+         *  terminal file count or we've seen a double filemark.
+         *
+         * filesleft      fmcount       action
+         * >0             1 or 2        continue.  We're counting down
+         *                              a certain number of tape files.
+         *                              We will keep going right over
+         *                              double EOFs.  The only other
+         *                              terminating event is EOT.
+         * 0              1 or 2        finish.  We've been counting down
+         *                              a certain number of tape files and
+         *                              we've reached the last.
+         * -1             1 or 2        continue.  We're set up to keep
+         *                              reading forever.  Only EOT will
+         *                              stop the reading.
+         * -2             1             continue.  This means we will
+         *                              stop on double-EOF.
+         * -2             2             finish
+         *
          */
         pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
     }
@@ -1126,6 +1154,8 @@ interrupts_init(pertexus_state_t *pstatep)
                     &icer_isr, FALLING);
     attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IHER)),
                     &iher_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IEOT)),
+                    &ieot_isr, FALLING);
 }
 
 /*
@@ -1137,6 +1167,7 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
     /*
      * GPIO6: IFMK (3)
      * GPIO7: ICER (29), IHER (28), IWSTR (19), IRSTR (18)
+     * GPIO8: IEOT (22)
      * GPIO9: IDBY (6)
      */
 
@@ -1149,10 +1180,13 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
 
     switch (iconfig) {
     case READING:
-        /* IFMK: On, ICER: Off, IHER: On, IWSTR: Off, IRSTR: On, IDBY: On */
+        /* IFMK: T, ICER: F, IHER: T, IWSTR: F, IRSTR: T, IDBY: T, IEOT: T */
+
+        /* GPIO6 */
         *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
         *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
 
+        /* GPIO7 */
         *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
                                  | GP_MASK(GP_IRSTR));
         *GP_IMR_REG(GP_IRSTR) = (
@@ -1162,14 +1196,22 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
             | (GP_MASK(GP_IHER)
                | GP_MASK(GP_IRSTR)));
 
+        /* GPIO8 */
+        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
+        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
+
+        /* GPIO9 */
         *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
         *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
         break;
 
     case WRITING:
-        /* IFMK: Off, ICER: Off, IHER: On, IWSTR: On, IRSTR: Off, IDBY: On */
+        /* IFMK: F, ICER: F, IHER: T, IWSTR: T, IRSTR: F, IDBY: T, IEOT: T */
+
+        /* GPIO6 */
         *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
 
+        /* GPIO7 */
         *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
                                  | GP_MASK(GP_IWSTR));
         *GP_IMR_REG(GP_IRSTR) = (
@@ -1179,27 +1221,44 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
             | (GP_MASK(GP_IHER)
                | GP_MASK(GP_IWSTR)));
 
+        /* GPIO8 */
+        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
+        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
+
+        /* GPIO9 */
         *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
         *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
         break;
 
     case ALLOFF:
-        /* IFMK: Off, ICER: Off, IHER: Off, IWSTR: Off, IRSTR: Off, IDBY: Off */
+        /* IFMK: F, ICER: F, IHER: F, IWSTR: F, IRSTR: F, IDBY: F */
+
+        /* GPIO6 */
         *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
+
+        /* GPIO7 */
         *GP_IMR_REG(GP_IRSTR) &= ~(
             GP_MASK(GP_ICER)
             | GP_MASK(GP_IHER)
             | GP_MASK(GP_IWSTR)
             | GP_MASK(GP_IRSTR));
+
+        /* GPIO8 */
+        *GP_IMR_REG(GP_IEOT) &= ~GP_MASK(GP_IEOT);
+
+        /* GPIO9 */
         *GP_IMR_REG(GP_IDBY) &= ~GP_MASK(GP_IDBY);
         break;
 
     default:
     case IDLE:
-        /* IFMK: On, ICER: On, IHER: On, IWSTR: On, IRSTR: On, IDBY: On */
+        /* IFMK: T, ICER: T, IHER: T, IWSTR: T, IRSTR: T, IDBY: T */
+
+        /* GPIO6 */
         *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
         *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
 
+        /* GPIO7 */
         *GP_ISR_REG(GP_IRSTR) = (
             GP_MASK(GP_ICER)
             | GP_MASK(GP_IHER)
@@ -1211,6 +1270,11 @@ interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
             | GP_MASK(GP_IWSTR)
             | GP_MASK(GP_IRSTR));
 
+        /* GPIO8 */
+        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
+        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
+
+        /* GPIO9 */
         *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
         *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
         break;
@@ -1228,6 +1292,75 @@ ifreset(pertexus_state_t *pstatep)
     GP_WRITE(pstatep, GP_IFEN, 1);
     delayMicroseconds(5);
     GP_WRITE(pstatep, GP_IFEN, 0);
+}
+
+/*
+ * Start a Pertec command.  The command byte is *logical*,
+ *  so a 1 in a bit is actually sent as a low signal on the line.
+ */
+static void
+pcmd(pertexus_state_t *pstatep, uint32_t cmdbits)
+{
+    uint32_t                 mask;
+
+    /*
+     * First, write the command byte as is, with IGO low.
+     */
+    mask = (GP_MASK(GP_IWRT) | GP_MASK(GP_IERASE)
+            | GP_MASK(GP_IWFM) | GP_MASK(GP_IEDIT)
+            | GP_MASK(GP_IREV));
+
+
+    /* "set" and "clear" here are inverted from normal use because
+     *  these are active-low signals */
+#if 0
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, (cmdbits & mask) ^ mask, 2);
+    Serial.print(F(" to *0x"));
+    hexprint32(&Serial, (uint32_t) GP_DR_SET_REG(GP_IGO), 8);
+    Serial.print(F(" (DR_SET) and 0x"));
+    hexprint(&Serial, (cmdbits & mask), 2);
+    Serial.print(F(" to *0x"));
+    hexprint32(&Serial, (uint32_t) GP_DR_CLEAR_REG(GP_IGO), 8);
+    Serial.println(F(" (DR_CLEAR)"));
+#endif
+
+    *GP_DR_SET_REG(GP_IGO) = (cmdbits & mask) ^ mask;
+    *GP_DR_CLEAR_REG(GP_IGO) = (cmdbits & mask);
+
+    /* Wait at least 1 microsecond */
+    delayMicroseconds(5);
+
+    /* Now lower IGO */
+#if 0
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, GP_MASK(GP_IGO), 2);
+    Serial.println(F(" to DR_CLEAR (clearing IGO)"));
+#endif
+    *GP_DR_CLEAR_REG(GP_IGO) = GP_MASK(GP_IGO);
+
+    /* Wait at least 1 microsecond */
+    /* !!! bkd 2022apr04 -- delayMicroseconds() is *way* off, hence
+     *  the long period
+     *  */
+    delayMicroseconds(10);
+
+#if 0
+    /* Set the IGO line back high.  This transition causes the action
+     *  to start. */
+    Serial.print(F("Writing 0x"));
+    hexprint(&Serial, GP_MASK(GP_IGO), 2);
+    Serial.println(F(" to DR_SET (setting IGO)"));
+#endif
+    *GP_DR_SET_REG(GP_IGO) = GP_MASK(GP_IGO);
+
+#if 0
+    /* Wait at least 1 microsecond */
+    delayMicroseconds(5);
+
+    /* Set everything back up again */
+    *GP_DR_SET_REG(GP_IGO) = mask;
+#endif
 }
 
 /*
@@ -1487,7 +1620,8 @@ idby_isr(void)
          *  action is the same.
          */
         if (!idby_asserted) {
-            readrecfinish(pstatep);
+            readrecfinish(pstatep,
+                          pstatep->opstate == PERTEXUS_STATE_OPSTATE_RFMSEEN);
         }
         break;
 
@@ -1512,6 +1646,9 @@ ifmk_isr(void)
 
         pstatep->opstate = PERTEXUS_STATE_OPSTATE_RFMSEEN;
     }
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.ifmk++;
+#endif
 }
 
 /* ICER interrupt */
@@ -1541,6 +1678,24 @@ iher_isr(void)
 #endif
 }
 
+/* IEOT interrupt */
+static void
+ieot_isr(void)
+{
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    if (pstatep->opstate != PERTEXUS_STATE_OPSTATE_IDLE) {
+        pstatep->opstate = PERTEXUS_STATE_OPSTATE_EOT;
+    }
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.ieot++;
+#endif
+}
+
+
 /* -------------------------------------------------------------------------- */
 /* Static functions (NORMAL).  These are medium-speed functions that
  *  should execute out of RAM */
@@ -1566,6 +1721,9 @@ iher_isr(void)
  * A portnum value of < 0, however, will read *both* PCA9535_CMD_INPx
  *  registers and return a 16-bit value with PCA9535_CMD_INP0 in
  *  the low bits and PCA9535_CMD_INP1 in the high bits.
+ *
+ * This is especially useful for dealing with interrupts from
+ *  the PCA9535.
  */
 static unsigned int
 portexp_read(pertexus_state_t *pstatep, int portnum)
@@ -1611,75 +1769,6 @@ portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
     for (portnum = 0; portnum < PCA9535_NPORTS; portnum++) {
         portexp_write(pstatep, bytenum + portnum, val);
     }
-}
-
-/*
- * Start a Pertec command.  The command byte is *logical*,
- *  so a 1 in a bit is actually sent as a low signal on the line.
- */
-static void
-pcmd(pertexus_state_t *pstatep, uint32_t cmdbits)
-{
-    uint32_t                 mask;
-
-    /*
-     * First, write the command byte as is, with IGO low.
-     */
-    mask = (GP_MASK(GP_IWRT) | GP_MASK(GP_IERASE)
-            | GP_MASK(GP_IWFM) | GP_MASK(GP_IEDIT)
-            | GP_MASK(GP_IREV));
-
-
-    /* "set" and "clear" here are inverted from normal use because
-     *  these are active-low signals */
-#if 0
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, (cmdbits & mask) ^ mask, 2);
-    Serial.print(F(" to *0x"));
-    hexprint32(&Serial, (uint32_t) GP_DR_SET_REG(GP_IGO), 8);
-    Serial.print(F(" (DR_SET) and 0x"));
-    hexprint(&Serial, (cmdbits & mask), 2);
-    Serial.print(F(" to *0x"));
-    hexprint32(&Serial, (uint32_t) GP_DR_CLEAR_REG(GP_IGO), 8);
-    Serial.println(F(" (DR_CLEAR)"));
-#endif
-
-    *GP_DR_SET_REG(GP_IGO) = (cmdbits & mask) ^ mask;
-    *GP_DR_CLEAR_REG(GP_IGO) = (cmdbits & mask);
-
-    /* Wait at least 1 microsecond */
-    delayMicroseconds(5);
-
-    /* Now lower IGO */
-#if 0
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, GP_MASK(GP_IGO), 2);
-    Serial.println(F(" to DR_CLEAR (clearing IGO)"));
-#endif
-    *GP_DR_CLEAR_REG(GP_IGO) = GP_MASK(GP_IGO);
-
-    /* Wait at least 1 microsecond */
-    /* !!! bkd 2022apr04 -- delayMicroseconds() is *way* off, hence
-     *  the long period
-     *  */
-    delayMicroseconds(10);
-
-#if 0
-    /* Set the IGO line back high.  This transition causes the action
-     *  to start. */
-    Serial.print(F("Writing 0x"));
-    hexprint(&Serial, GP_MASK(GP_IGO), 2);
-    Serial.println(F(" to DR_SET (setting IGO)"));
-#endif
-    *GP_DR_SET_REG(GP_IGO) = GP_MASK(GP_IGO);
-
-#if 0
-    /* Wait at least 1 microsecond */
-    delayMicroseconds(5);
-
-    /* Set everything back up again */
-    *GP_DR_SET_REG(GP_IGO) = mask;
-#endif
 }
 
 /*
@@ -1953,6 +2042,9 @@ cmd_stats(cmdif_t *cmdifp, int argc, char **argv)
 
     outstreamp->print(F("intcounts.ifmk = "));
     outstreamp->println(pstatep->intcounts.ifmk);
+
+    outstreamp->print(F("intcounts.ieot = "));
+    outstreamp->println(pstatep->intcounts.ieot);
 #else
     outstreamp->println(F("Interrupt statistics not being kept"));
 #endif
@@ -1991,32 +2083,95 @@ cmd_fsf(cmdif_t *cmdifp, int argc, char **argv)
 static void
 cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv)
 {
-    unsigned int     nrecsleft, nbytesleft, recsize;
-    uint8_t          writeval, regval;
-    volatile uint32_t    *stroberegp, *datregp, *cmdregp;
+    unsigned int     nrecsleft, nbytesleft, recsize, nfmk;
+    uint32_t         regval;
+    int              val;
+    uint8_t          writeval;
     pertexus_state_t    *pstatep;
+    Stream              *streamp;
 
+    streamp = cmdifp->outstreamp;
     pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
-
-
-    UNUSED(argc);
-    UNUSED(argv);
 
     recsize = 2048;
     nrecsleft = 100;
+    nfmk = 2;
+
+    argc--;
+    argv++;
+    while (argc != 0) {
+        if (**argv == '-') {
+            if (strcmp_P(*argv, PSTR("-nrecs")) == 0) {
+                if (argc < 2) {
+                    streamp->println(
+                        F("-nrecs must be followed by a decimal number"));
+                    goto usage;
+                }
+                argc--;
+                argv++;
+                val = atoi(*argv);
+                if (val < 0) {
+                    streamp->println(F("invalid value after -nrecs"));
+                    goto usage;
+                }
+                nrecsleft = val;
+            }
+            else if (strcmp_P(*argv, PSTR("-recsize")) == 0) {
+                if (argc < 2) {
+                    streamp->println(
+                        F("-recsize must be followed by a decimal number"));
+                    goto usage;
+                }
+                argc--;
+                argv++;
+                val = atoi(*argv);
+                if (val <= 0) {
+                    streamp->println(F("invalid value after -recsize"));
+                    goto usage;
+                }
+                recsize = val;
+            }
+            else if (strcmp_P(*argv, PSTR("-nfmk")) == 0) {
+                if (argc < 2) {
+                    streamp->println(
+                        F("-nfmk must be followed by a decimal number"));
+                    goto usage;
+                }
+                argc--;
+                argv++;
+                val = atoi(*argv);
+                if (val < 0) {
+                    streamp->println(F("invalid value after -nfmk"));
+                    goto usage;
+                }
+                recsize = val;
+            }
+            else {
+                streamp->print(F("invalid flag "));
+                streamp->println(*argv);
+                goto usage;
+            }
+        }
+        else {
+            streamp->print(F("unknown argument "));
+            streamp->println(*argv);
+usage:
+            streamp->println(
+                F("usage: testwrite [-nrecs n] [-recsize s] [-nfmk f]"));
+            return;
+        }
+
+        argc--;
+        argv++;
+    }
 
     /*
      * Check to see if writing is disabled.
      */
-    regval = GP_READ(pstatep, GP_IFPT);
-    if (regval == 0) {
-        cmdifp->outstreamp->println(F("Error: tape is write protected"));
+    if (GP_READ(pstatep, GP_IFPT) == 0) {
+        streamp->println(F("Error: tape is write protected"));
         goto fail1;
     }
-
-    stroberegp = GP_DR_REG(GP_IWSTR);
-    datregp = GP_DR_REG(GP_IW0);
-    cmdregp = GP_DR_REG(GP_ILWD);
 
     interrupts_set(pstatep, ALLOFF);
 
@@ -2030,47 +2185,58 @@ cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv)
         pcmd(pstatep, PCMD_IWRT);
 
         if (!bitwait(GP_DR_REG(GP_IFBY), GP_MASK(GP_IFBY), FALSE,
-                     NULL, 1000)) {
-            cmdifp->outstreamp->println(F("Error: IFBY failed to assert"));
+                     streamp, 1000)) {
+            streamp->println(F("Error: IFBY failed to assert"));
             goto fail2;
         }
 
         if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), FALSE,
-                     NULL, 2UL*1000UL*1000UL)) {
-            cmdifp->outstreamp->println(F("Error: IDBY failed to assert"));
+                     streamp, 2UL*1000UL*1000UL)) {
+            streamp->println(F("Error: IDBY failed to assert"));
             goto fail3;
         }
 
         noInterrupts();
 
         while (nbytesleft > 1) {
-            *datregp = ~writeval;       /* Inverted because that's
+            /* Load out the next byte */
+            regval = *GP_DR_REG(GP_IW7);
+            regval &= ~(0xff << GP_BITNUM(GP_IW7));
+            regval |= ~writeval << GP_BITNUM(GP_IW7);
+                                        /* Inverted because that's
                                          *  the way the lines are
                                          *  specified. */
+            *GP_DR_REG(GP_IW7) = regval;
+
             writeval--;
             /* Wait to see a low-to-high transition of the strobe */
-            do {
-                regval = *stroberegp;
-            } while ((regval & GP_MASK(GP_IWSTR)) != 0);
-
-            while ((regval & GP_MASK(GP_IWSTR)) == 0) {
-                regval = *stroberegp;
+            while (GP_READ(pstatep, GP_IWSTR) != 0) {
+                ;
             }
 
+            while (GP_READ(pstatep, GP_IWSTR) == 0) {
+                ;
+            }
             nbytesleft--;
         }
 
         /* Write the final byte and set the ILWD bit */
-        *cmdregp &= ~GP_MASK(GP_ILWD);
-        *datregp = ~writeval;
-        /* Wait to see a low-to-high transition of the strobe */
-        do {
-            regval = *stroberegp;
-        } while ((regval & GP_MASK(GP_IWSTR)) != 0);
 
-        while ((regval & GP_MASK(GP_IWSTR)) == 0) {
-            regval = *stroberegp;
+        *GP_DR_CLEAR_REG(GP_ILWD) = GP_MASK(GP_ILWD);
+        regval = *GP_DR_REG(GP_IW7);
+        regval &= ~(0xff << GP_BITNUM(GP_IW7));
+        regval |= ~writeval << GP_BITNUM(GP_IW7);
+        *GP_DR_REG(GP_IW7) = regval;
+
+        /* Wait to see a low-to-high transition of the strobe */
+        while (GP_READ(pstatep, GP_IWSTR) != 0) {
+            ;
         }
+
+        while (GP_READ(pstatep, GP_IWSTR) == 0) {
+            ;
+        }
+
 
         /* !!! ??? wait to finish */
 
@@ -2079,11 +2245,31 @@ cmd_testwrite(cmdif_t *cmdifp, int argc, char **argv)
         interrupts();
 
         /* Clear the ILWD bit */
-        *cmdregp |= GP_MASK(GP_ILWD);
+        *GP_DR_SET_REG(GP_ILWD) = GP_MASK(GP_ILWD);
     }
 
-    /* Now write a filemark */
-    pcmd(pstatep, PCMD_IWRT | PCMD_IWFM);
+    /* Now write the filemarks */
+
+    while (nfmk != 0) {
+        /* First, wait for IDBY to go inactive (high) */
+        if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), TRUE,
+                     streamp, 2UL*1000UL*1000UL)) {
+            streamp->println(F("Error: IDBY failed to deassert"));
+            goto fail3;
+        }
+
+        pcmd(pstatep, PCMD_IWRT | PCMD_IWFM);
+
+        /* Next, wait for IDBY to go active (high) */
+        if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), FALSE,
+                     streamp, 2UL*1000UL*1000UL)) {
+            streamp->println(F("Error: IDBY failed to assert"));
+            goto fail3;
+        }
+
+        nfmk--;
+    }
+
 
     /* And re-activate interrupts */
     return;
@@ -2437,33 +2623,112 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
 {
     File             writefile;
     recsize_t        recsofar, reclen;
-    uint32_t         header, lastfooteroff, prealloc;
+    uint32_t         zeroword;
+    uint32_t         header, lastfooteroff, nerrs, nbytes;
+#if 0
+    uint32_t         prealloc;
+#endif
     uint8_t          rdrec;
 #if 0
     uint8_t          timsk0_saved;
 #endif
     uint8_t         *rdptr, *wrptr;
     uint16_t         writesize, lastwritesize;
+    int              val;
+    bool_t           seenend;
     int              inchar;
     tape_rec_t      *trp;
     Stream          *streamp;
     bool_t           nofile;
     pertexus_state_t    *pstatep;
+    const char      *outfn;
 
     pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
     streamp = cmdifp->outstreamp;
 
+#if 0
     prealloc = 60UL*1024UL*1024UL;      /* preallocate 60 MiB */
+#endif
 
-    if (argc < 2) {
-        streamp->println(F("usage: read tape-image-file"));
+    argc--;
+    argv++;
+    outfn = NULL;
+    nofile = FALSE;
+    seenend = FALSE;
+
+    while (argc != 0) {
+        if (strcmp_P(*argv, PSTR("-")) == 0) {
+            if (outfn != NULL || nofile) {
+errfn:
+                streamp->println(
+                    F("only one instance of tape-image-file or '-' allowed"));
+                goto usage;
+            }
+            nofile = TRUE;
+        }
+        else if (**argv == '-') {
+            if (strcmp_P(*argv, PSTR("-eot")) == 0) {
+                if (seenend) {
+errend:
+                    streamp->println(
+                        F("only one instance of -eot or -nfiles n allowed"));
+                    goto usage;
+                }
+                seenend = TRUE;
+                pstatep->filesleft = -1;
+            }
+            else if (strcmp_P(*argv, PSTR("-nfiles")) == 0) {
+                if (seenend) {
+                    goto errend;
+                }
+                if (argc < 2) {
+                    streamp->println(
+                        F("-nfiles must be followed by a file count"));
+                    goto usage;
+                }
+                argc--;
+                argv++;
+                val = atoi(*argv);
+                if (val < 1) {
+                    streamp->println(
+                        F("-nfiles must be followed by a positive integer"));
+                    goto usage;
+                }
+                pstatep->filesleft = val;
+                seenend = TRUE;
+            }
+            else {
+                streamp->print(F("unknown flag "));
+                streamp->println(*argv);
+                goto usage;
+            }
+        }
+        else {
+            if (outfn != NULL || nofile) {
+                goto errfn;
+            }
+            outfn = *argv;
+        }
+        argc--;
+        argv++;
+    }
+
+
+    if (outfn == NULL && !nofile) {
+usage:
+        streamp->println(F("usage: read [-eot|-nfiles n] [-|tape-image-file]"));
         return;
     }
 
-    if (strcmp_P(argv[1], PSTR("-")) == 0) {
-        nofile = TRUE;
+    /* Default to double EOF terminating our read */
+    if (!seenend) {
+        pstatep->filesleft = -2;        /* Magic value to indicate
+                                         *  we're looking for two
+                                         *  consecutive EOFs with
+                                         *  no intervening data */
     }
-    else {
+
+    if (!nofile) {
         if (!pstatep->sdcardinit) {
             if (!sdcard_init(pstatep, streamp)) {
                 streamp->println(F("SD card initialization failed."));
@@ -2477,19 +2742,18 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
         streamp->print(F(" bytes long..."));
 
         if (!writefile.createContiguous(&(pstatep->root),
-                                        argv[1], prealloc)) {
+                                        outfn, prealloc)) {
             streamp->println(F("unable to open file"));
             return;
         }
         streamp->println(F("done"));
 #else
-        writefile = pertexus_state.sdp->open(argv[1], FILE_WRITE);
+        writefile = pertexus_state.sdp->open(outfn, FILE_WRITE);
         if (!writefile) {
             streamp->println(F("unable to open file"));
             return;
         }
 #endif
-        nofile = FALSE;
     }
 
     /* Initialize our state */
@@ -2499,7 +2763,7 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
     pstatep->filesdone = pstatep->recsdone = 0;
     recsofar = 0;
     lastfooteroff = 0;  /* offset past last valid footer */
-    header = 0;
+    zeroword = 0;
     writesize = lastwritesize = 0;      /* avoid compiler warning */
 
     trp = NULL;
@@ -2510,6 +2774,8 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
     timsk0_saved = TIMSK0;
     TIMSK0 = 0;
 #endif
+
+    nbytes = nerrs = 0;
 
     /*                    updated by
      *              this func     interrupt
@@ -2583,7 +2849,7 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
                  *  fill this in afterwards.
                  */
 
-                if (!nofile && writefile.write(&header, sizeof(uint32_t))
+                if (!nofile && writefile.write(&zeroword, sizeof(uint32_t))
                     != sizeof(uint32_t)) {
                     goto writefail;
                 }
@@ -2630,19 +2896,20 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
                          */
                         postgap = -((uint8_t) reclen) & 1;
                         if (postgap != 0) {
-                            if (writefile.write(&header, postgap) != postgap) {
+                            if (writefile.write(&zeroword,
+                                                postgap) != postgap) {
                                 goto writefail;
                             }
                         }
 
                         /*
-                         * NOTE: Hack here.  The tape_rec_t structure
-                         *  is designed to match the TAP file header/footer,
-                         *  which is a 32-bit value, even though tape_rec_t
-                         *  is made of a 24-bit and an 8-bit value.
+                         * Construct the header with the record length
+                         *  and the flags glued together.
                          */
+                        header = ((trp->len & 0x00ffffff)
+                                  | (trp->flags << 24));
 
-                        if (writefile.write(&(trp->len), sizeof(uint32_t))
+                        if (writefile.write(&header, sizeof(uint32_t))
                             != sizeof(uint32_t)) {
 writefail:
                             streamp->println(F("Failure when writing."));
@@ -2650,6 +2917,11 @@ writefail:
                             break;
                         }
                     }
+                    if ((trp->flags & TAPE_REC_FLAGS_ERR) != 0) {
+                        nerrs++;
+                    }
+
+                    nbytes += reclen;
                     pstatep->recsdone++;
                 }
                 else {
@@ -2713,6 +2985,16 @@ writefail:
             streamp->print(F(", position = "));
             streamp->println(writefile.position(), DEC);
         }
+        else if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_EOT) {
+            /*
+             * We've seen the end of the tape.
+             *  Immediately stop reading.
+             */
+            streamp->println(F("Terminating due to end of tape"));
+            ifreset(pstatep);
+            pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+        }
+
 
         /*
          * Now that we've made some space we can attempt to
@@ -2741,6 +3023,7 @@ writefail:
      *  headers (which are all 0s right now).
      */
     if (!nofile && lastfooteroff >= sizeof(uint32_t)) {
+#if 0
         uint32_t         trashsize;
 
         /*
@@ -2770,6 +3053,7 @@ writefail:
                 streamp->println(F("succeeded"));
             }
         }
+#endif
 
         /*
          * Now go backward through the file, copying the
@@ -2835,8 +3119,12 @@ writefail:
 #endif
 
     streamp->print(F("Total of "));
+    streamp->print(nbytes, DEC);
+    streamp->print(F(" bytes in "));
     streamp->print(pstatep->recsdone, DEC);
-    streamp->print(F(" records in "));
+    streamp->print(F(" records ("));
+    streamp->print(nerrs, DEC);
+    streamp->print(F(" records with errors) in "));
     streamp->print(pstatep->filesdone, DEC);
     streamp->println(F(" files"));
 }
@@ -3501,6 +3789,87 @@ usage:
     else {
         goto usage;
     }
+}
+
+/*
+ * Perform a "security" erase of an entire tape.
+ */
+static void
+cmd_erase(cmdif_t *cmdifp, int argc, char **argv)
+{
+    unsigned long        starttime, deltatime;
+    unsigned long        ips;
+    bool_t               cmdcancel;
+    pertexus_state_t    *pstatep;
+    Stream              *streamp;
+
+    pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
+    streamp = cmdifp->outstreamp;
+
+    UNUSED(argc);
+    UNUSED(argv);
+
+    /*
+     * Check to see if writing is disabled.
+     */
+    if (GP_READ(pstatep, GP_IFPT) == 0) {
+        streamp->println(F("Error: tape is write protected"));
+        return;
+    }
+
+    /*
+     * And make sure we're at the beginning of the tape.
+     */
+    if (GP_READ(pstatep, GP_ILDP) != 0) {
+        streamp->println(F("Error: tape is not at load point"));
+        return;
+    }
+
+    starttime = millis();
+    cmdcancel = FALSE;
+
+    /* Issue the command to search forward for a file mark */
+    pcmd(pstatep, PCMD_IWRT | PCMD_IERASE | PCMD_IWFM | PCMD_IEDIT);
+
+    if (!bitwait(GP_DR_REG(GP_IFBY), GP_MASK(GP_IFBY), FALSE, NULL, 1000)) {
+        streamp->println(F("Error: IFBY failed to assert"));
+        cmdcancel = TRUE;
+    }
+    else if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), FALSE,
+                      streamp, 0)) {
+        /* We must have aborted via ^C */
+        streamp->println(F("\r\nAborted waiting for IDBY to assert."));
+        cmdcancel = TRUE;
+    }
+    else if (!bitwait(GP_DR_REG(GP_IDBY), GP_MASK(GP_IDBY), TRUE,
+                      streamp, 0)) {
+        /* We must have aborted via ^C */
+        streamp->println(F("\r\nAborted waiting for IDBY to deassert."));
+        cmdcancel = TRUE;
+    }
+    else {
+        streamp->println(F("Erase completed succesfully."));
+    }
+
+    if (cmdcancel) {
+        /* Cancel any pending command */
+        ifreset(pstatep);
+    }
+
+#define ROUNDDIV(x, y)      (((x) + ((y)/2))/(y))
+
+    deltatime = (millis() - starttime);
+    streamp->print(F("A total of "));
+    streamp->print(deltatime, DEC);
+    streamp->println(F(" ms elapsed."));
+    ips = 50UL;
+    streamp->print(F("At "));
+    streamp->print(ips, DEC);
+    streamp->print(F(" ips that represents "));
+    streamp->print(ROUNDDIV(deltatime * ips, 1000UL), DEC);
+    streamp->print(F(" inches, or "));
+    streamp->print(ROUNDDIV(deltatime * ips, 12UL * 1000UL), DEC);
+    streamp->println(F(" feet."));
 }
 
 /* -------------------------------------------------------------------------- */
