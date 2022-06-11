@@ -165,6 +165,9 @@
 #define GP_ILDP       (GROUPA1, 1,  6, -1, NULL,  0, 2,  4)  /* IOExpander:14 */
 #define GP_IFPT       (GROUPA1, 1,  7, -1, NULL,  0, 2, 32)  /* IOExpander:15 */
 
+#define GP_SETLOW       6       /* lowest "set" number of GPIOs in use */
+#define GP_SETHIGH      9       /* lowest "set" number of GPIOs in use */
+
 /*
  * GPIOs are controlled by a set of 11 registers (DR, GDIR, PSR, ICR1, ICR2,
  *  IMR, ISR, EDGE_SEL, DR_SET, DR_CLEAR, and DR_TOGGLE).  These registers
@@ -253,20 +256,25 @@
 
 /* Write a value to a port expander GPIO .  Caller needs to have made
  *  sure this is really a port-expansion GPIO. */
-#define _GP_PORTEXP_WRITE(pstatep, setnum, bitnum, val)                  \
+#define _GP_PORTEXP_WRITE(pstatep, setnum, bitnum, val)                 \
     do {                                                                \
+        uint8_t *_cachedregp, _cachedval;                               \
+                                                                        \
+        _cachedregp = &((pstatep)->pexpregs[PCA9535_CMD_OUTP0           \
+                                            + (setnum)]);               \
+        _cachedval = *_cachedregp;                                      \
         /* Port expander GPIO */                                        \
         if ((val) != 0) {                                               \
             /* Turning bit on */                                        \
-            (pstatep)->pexpregs[(setnum)] |= (1 << (bitnum));           \
+            _cachedval |= (1 << (bitnum));                              \
         }                                                               \
         else {                                                          \
             /* Turning bit off */                                       \
-            (pstatep)->pexpregs[(setnum)] &= ~(1 << (bitnum));          \
+            _cachedval  &= ~(1 << (bitnum));                            \
         }                                                               \
         portexp_write((pstatep),                                        \
-                      PCA9535_CMD_OUTP0 + (setnum),                     \
-                      (pstatep)->pexpregs[(setnum)]);                   \
+                      PCA9535_CMD_OUTP0 + (setnum), _cachedval);        \
+        *_cachedregp = _cachedval;                                      \
     } while (FALSE)
 
 /* Write a value to a traditional GPIO */
@@ -505,7 +513,12 @@ ASSERT_CT(GP_SETNUM(GP_IREV) == GP_SETNUM(GP_IGO));
 #define PCA9535_CMD_CFG0    0x06    /* (write to) configuration port 0 */
 #define PCA9535_CMD_CFG1    0x07    /* (write to) configuration port 1 */
 
+#define PCA9535_NCMDS       8       /* total number of "commands" */
+
 #define PCA9535_NPORTS      2
+
+/* Temporary filename length (fits in 8.3) */
+#define TMPFNLEN        13
 
 /* -------------------------------------------------------------------------- */
 /* New types and type-specific macros */
@@ -603,11 +616,13 @@ typedef struct _pertexus_state {
         unsigned long        idby;
         unsigned long        ifmk;
         unsigned long        ieot;
+/*        unsigned long        portexp; */
     } intcounts;
 #endif      /* defined(OPT_INTCOUNTS) */
     int             filesleft;
     unsigned int    filesdone;
     unsigned int    recsdone;
+    uint32_t        startcmd;
     tape_rec_t      taperecs[TAPENRECS];
     uint8_t         buf[TAPEBUFSIZ];
     uint8_t         wrnextbyte;
@@ -615,19 +630,46 @@ typedef struct _pertexus_state {
     cmdif_t         cmdif;
     gpinreg_t       gpinregs[GP_MAXINREGS];
     unsigned int    ninregs;
-    uint8_t         pexpregs[3 * PCA9535_NPORTS];
+    uint8_t         pexpregs[PCA9535_NCMDS];
     uint8_t         gpinvals[GP_MAXINREGS];
     bool_t          sdcardinit;
     TwoWire        *portexp;
     SDClass         *sdp;
 } pertexus_state_t;
 
-typedef enum {
-    IDLE = 0,
-    READING = 1,
-    WRITING = 2,
-    ALLOFF = 3
-} interrupt_config_t;
+/* Interrupt configurations: each of these bits indicates that the
+ *  given interrupt should be enabled */
+#define INTCFG_IFMK     0x00000001
+#define INTCFG_ICER     0x00000002
+#define INTCFG_IHER     0x00000004
+#define INTCFG_IWSTR    0x00000008
+#define INTCFG_IRSTR    0x00000010
+#define INTCFG_IEOT     0x00000020
+/* #define INTCFG_PORTEXP  0x00000040 */      /* LPI2C4_INT port expander int */
+#define INTCFG_IDBY     0x00000080
+
+/* Internal readonly data mapping these interrupts to GPIO set
+ *  numbers and bitmasks */
+typedef struct _pertexus_intcfgmap {
+    uint32_t         intcfg;        /* interrupt configuration bit */
+    uint32_t         bitmask;
+    unsigned int     setnum;
+} pertexus_intcfgmap_t;
+
+/* Interrupt configurations for different modes of operation: */
+#define INTCFG_IDLE     (INTCFG_IFMK | INTCFG_ICER                      \
+                         | INTCFG_IHER | INTCFG_IWSTR                   \
+                         | INTCFG_IRSTR | INTCFG_IEOT                   \
+                         /* | INTCFG_PORTEXP */ | INTCFG_IDBY)
+#define INTCFG_READING  (INTCFG_IFMK /* | INTCFG_ICER */                \
+                         | INTCFG_IHER /* | INTCFG_IWSTR */             \
+                         | INTCFG_IRSTR | INTCFG_IEOT                   \
+                         /* | INTCFG_PORTEXP  */| INTCFG_IDBY)
+#define INTCFG_WRITING  (INTCFG_IFMK /* | INTCFG_ICER */                \
+                         | INTCFG_IHER | INTCFG_IWSTR                   \
+                         /* | INTCFG_IRSTR */ | INTCFG_IEOT             \
+                         /* | INTCFG_PORTEXP */ | INTCFG_IDBY)
+#define INTCFG_ALLOFF  0
 
 
 /* -------------------------------------------------------------------------- */
@@ -637,9 +679,6 @@ typedef enum {
 static FASTRUN inline void writerecstart(pertexus_state_t *pstatep);
 static inline void readrecstart(pertexus_state_t *pstatep);
 static inline void readrecfinish(pertexus_state_t *pstatep, bool_t eof);
-static FASTRUN void interrupts_init(pertexus_state_t *pstatep);
-static FASTRUN void interrupts_set(pertexus_state_t *pstatep,
-                                   interrupt_config_t iconfig);
 static FASTRUN void ifreset(pertexus_state_t *pstatep);
 static FASTRUN void pcmd(pertexus_state_t *pstatep, uint32_t cmdbits);
 static FASTRUN void irstr_isr(void);
@@ -649,8 +688,13 @@ static FASTRUN void ifmk_isr(void);
 static FASTRUN void icer_isr(void);
 static FASTRUN void iher_isr(void);
 static FASTRUN void ieot_isr(void);
+#if 0
+static FASTRUN void portexp_isr(void);
+#endif
 
 /* Medium-speed functions */
+static void interrupts_init(pertexus_state_t *pstatep);
+static void interrupts_set(pertexus_state_t *pstatep, uint32_t intcfg);
 static unsigned int portexp_read(pertexus_state_t *pstatep, int portnum);
 static void portexp_write(pertexus_state_t *pstatep, unsigned int bytenum,
                           unsigned int val);
@@ -658,7 +702,10 @@ static void portexp_writeall(pertexus_state_t *pstatep, unsigned int bytenum,
                              unsigned int val);
 static bool_t bitwait(volatile uint32_t *regp, uint32_t bitmask,
                       bool_t bitset, Stream *instreamp, unsigned long timeout);
+static unsigned int atohex(const char *strp);
 static void cmd_echo(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_peek(cmdif_t *cmdifp, int argc, char **argv);
+static void cmd_poke(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_date(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_reset(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_stats(cmdif_t *cmdifp, int argc, char **argv);
@@ -677,8 +724,6 @@ static void cmd_erase(cmdif_t *cmdifp, int argc, char **argv);
 
 #if 0
 static void cmd_cmd(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_peek(cmdif_t *cmdifp, int argc, char **argv);
-static void cmd_poke(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_dump(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_play(cmdif_t *cmdifp, int argc, char **argv);
 static void cmd_tapetest(cmdif_t *cmdifp, int argc, char **argv);
@@ -687,24 +732,31 @@ static bool_t gp_inchanges(const uint8_t *valp,
                            const uint8_t *prevp);
 static void gp_inprint(Stream *outstreamp,
                        const uint8_t *valp, const uint8_t *prevp);
-static unsigned int atohex(const char *strp);
 #endif
 
 
 /* Slow, rarely-called functions that exist in and run from flash */
 static FLASHMEM void gpios_init(pertexus_state_t *pstatep);
 static FLASHMEM void debug_dumpstate(pertexus_state_t *pstatep,
-                                     Stream *outstreamp);
-static FLASHMEM bool_t sdcard_init(pertexus_state_t *pstatep, Stream *streamp);
+                                     Print *outstreamp);
+static FLASHMEM bool_t sdcard_init(pertexus_state_t *pstatep, Print *streamp);
 static FLASHMEM void printDirectory(File dir, int numSpaces,
-                                    Stream *outstreamp);
-static FLASHMEM void printSpaces(int num, Stream *outstreamp);
-static FLASHMEM void printTime(const DateTimeFields tm, Stream *outstreamp,
+                                    Print *outstreamp);
+static FLASHMEM void printSpaces(int num, Print *outstreamp);
+static FLASHMEM void printTime(const DateTimeFields tm, Print *outstreamp,
                                bool_t printwday, bool_t printsecs);
-static FLASHMEM void printpad(Stream *streamp, const char *strp, int padlen);
-static FLASHMEM void hexprint(Stream *outstream, unsigned int val, int ndigits);
-static FLASHMEM void hexprint32(Stream *outstream, uint32_t val, int ndigits);
+static FLASHMEM void printpad(Print *streamp, const char *strp, int padlen);
+static FLASHMEM void hexprint(Print *outstream, unsigned int val, int ndigits);
+static FLASHMEM void hexprint32(Print *outstream, uint32_t val, int ndigits);
 static FLASHMEM time_t getTeensy3Time(void);
+static FLASHMEM void pca9535_init(pertexus_state_t *pstatep);
+static FLASHMEM bool_t tmpfn_gen(FS *fsp, char *bufp);
+static FLASHMEM bool_t tapfilerev(pertexus_state_t *pstatep, Print *outprintp,
+                                  File *writefile, File *tmpfile,
+                                  uint32_t lastfooteroff);
+static FLASHMEM bool_t tapfilefinalize(pertexus_state_t *pstatep,
+                                       Print *outprintp, File *writefile,
+                                       uint32_t lastfooteroff);
 
 /* -------------------------------------------------------------------------- */
 /* Local constant data */
@@ -821,9 +873,9 @@ static const cmdifdisp_t cmdifdisp[] PROGMEM = {
     { &(_cmd_write_name[0]), &(_cmd_write_brief[0]), NULL, &cmd_write },
     { &(_cmd_read_name[0]), &(_cmd_read_brief[0]), NULL, &cmd_read },
     { &(_cmd_erase_name[0]), &(_cmd_erase_brief[0]), NULL, &cmd_erase },
-#if 0
     { &(_cmd_peek_name[0]), &(_cmd_peek_brief[0]), NULL, &cmd_peek },
     { &(_cmd_poke_name[0]), &(_cmd_poke_brief[0]), NULL, &cmd_poke },
+#if 0
     { &(_cmd_cmd_name[0]), &(_cmd_cmd_brief[0]), NULL, &cmd_cmd },
     { &(_cmd_dump_name[0]), &(_cmd_dump_brief[0]), NULL, &cmd_dump },
     { &(_cmd_play_name[0]), &(_cmd_play_brief[0]), NULL, &cmd_play },
@@ -910,11 +962,23 @@ static const gpinfo_t gpinfos[] PROGMEM = {
     GPINFO_ENTRY("IDEN",     "*Speed select", GP_IDEN),
 };
 
-const char daysofweek[] PROGMEM = {
+static const char daysofweek[] PROGMEM = {
     "SunMonTueWedThuFriSat"
 };
-const char monthnames[] PROGMEM = {
+static const char monthnames[] PROGMEM = {
     "JanFebMarAprMayJunJulAugSepOctNovDec"
+};
+
+/* Interrupt configuration mapping */
+static const pertexus_intcfgmap_t intcfgmap[] PROGMEM = {
+    { INTCFG_IFMK, GP_MASK(GP_IFMK), GP_SETNUM(GP_IFMK) },
+    { INTCFG_ICER, GP_MASK(GP_ICER), GP_SETNUM(GP_ICER) },
+    { INTCFG_IHER, GP_MASK(GP_IHER), GP_SETNUM(GP_IHER) },
+    { INTCFG_IWSTR, GP_MASK(GP_IWSTR), GP_SETNUM(GP_IWSTR) },
+    { INTCFG_IRSTR, GP_MASK(GP_IRSTR), GP_SETNUM(GP_IRSTR) },
+    { INTCFG_IEOT, GP_MASK(GP_IEOT), GP_SETNUM(GP_IEOT) },
+/*    { INTCFG_PORTEXP, GP_MASK(GP_LPI2C4_INT), GP_SETNUM(GP_LPI2C4_INT) }, */
+    { INTCFG_IDBY, GP_MASK(GP_IDBY), GP_SETNUM(GP_IDBY) }
 };
 
 /* -------------------------------------------------------------------------- */
@@ -938,15 +1002,7 @@ setup(void)
     /* set the Time library to use Teensy 4.1's RTC to keep time */
     setSyncProvider(&getTeensy3Time);
 
-    pertexus_state.portexp = &Wire2;
-    pertexus_state.sdp = &SD;
-
-    /*
-     * First, setup the I2C to communicate with the
-     *  port expander.
-     */
-    pertexus_state.portexp->begin();
-    pertexus_state.portexp->setClock(400000);
+    pca9535_init(&pertexus_state);
 
     gpios_init(&pertexus_state);
     interrupts_init(&pertexus_state);
@@ -1058,7 +1114,7 @@ readrecstart(pertexus_state_t *pstatep)
     pstatep->recbytes = 0;
     pstatep->harderrcount = 0;
     pstatep->opstate = PERTEXUS_STATE_OPSTATE_RSTART;
-    pcmd(pstatep, 0);
+    pcmd(pstatep, pstatep->startcmd);
 }
 
 /*
@@ -1127,9 +1183,20 @@ readrecfinish(pertexus_state_t *pstatep, bool_t eof)
     else {
         /*
          * Time to start reading another record.
+         *  NOTE: If we are reading in reverse, we really don't
+         *   want to start a new read if ILDP is asserted.
+         *   Sadly, ILDP is on the port expander, and to read it
+         *   takes time, so we would rather do that at idle level.
+         *  So, if we're reading in reverse we look at the LPI2C4_INT
+         *   line.  If it's asserted (low) then we'll demur and
+         *   read the port expander later in the main loop.  If
+         *   ILDP is not asserted then we can restart the read in
+         *   that loop.
          */
         if (!RING_ISFULL(wrrec, pstatep->rdrec, TAPENRECS)
-            && !RINGPTR_ISFULL(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ)) {
+            && !RINGPTR_ISFULL(pstatep->wrptr, pstatep->rdptr, TAPEBUFSIZ)
+            && ((pstatep->startcmd & PCMD_IREV) == 0
+                || GP_READ(pstatep, GP_LPI2C4_INT) != 0)) {
             readrecstart(pstatep);
         }
         else {
@@ -1139,147 +1206,6 @@ readrecfinish(pertexus_state_t *pstatep, bool_t eof)
     }
 }
 
-static void
-interrupts_init(pertexus_state_t *pstatep)
-{
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IRSTR)),
-                    &irstr_isr, FALLING);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IWSTR)),
-                    &iwstr_isr, RISING);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IDBY)),
-                    &idby_isr, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IFMK)),
-                    &ifmk_isr, FALLING);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_ICER)),
-                    &icer_isr, FALLING);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IHER)),
-                    &iher_isr, FALLING);
-    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IEOT)),
-                    &ieot_isr, FALLING);
-}
-
-/*
- * Set up interrupts for a particular operation
- */
-static void
-interrupts_set(pertexus_state_t *pstatep, interrupt_config_t iconfig)
-{
-    /*
-     * GPIO6: IFMK (3)
-     * GPIO7: ICER (29), IHER (28), IWSTR (19), IRSTR (18)
-     * GPIO8: IEOT (22)
-     * GPIO9: IDBY (6)
-     */
-
-    /* Assert that ICER, IHER, IWSTR, and IRSTR are all in the same
-     *  interrupt group */
-
-    ASSERT_CT(GP_SETNUM(GP_ICER) == GP_SETNUM(GP_IHER));
-    ASSERT_CT(GP_SETNUM(GP_IHER) == GP_SETNUM(GP_IWSTR));
-    ASSERT_CT(GP_SETNUM(GP_IWSTR) == GP_SETNUM(GP_IRSTR));
-
-    switch (iconfig) {
-    case READING:
-        /* IFMK: T, ICER: F, IHER: T, IWSTR: F, IRSTR: T, IDBY: T, IEOT: T */
-
-        /* GPIO6 */
-        *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
-        *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
-
-        /* GPIO7 */
-        *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
-                                 | GP_MASK(GP_IRSTR));
-        *GP_IMR_REG(GP_IRSTR) = (
-            (*GP_IMR_REG(GP_IRSTR)
-             & ~(GP_MASK(GP_ICER)
-                 | GP_MASK(GP_IWSTR)))
-            | (GP_MASK(GP_IHER)
-               | GP_MASK(GP_IRSTR)));
-
-        /* GPIO8 */
-        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
-        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
-
-        /* GPIO9 */
-        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
-        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
-        break;
-
-    case WRITING:
-        /* IFMK: F, ICER: F, IHER: T, IWSTR: T, IRSTR: F, IDBY: T, IEOT: T */
-
-        /* GPIO6 */
-        *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
-
-        /* GPIO7 */
-        *GP_ISR_REG(GP_IRSTR) = (GP_MASK(GP_IHER)
-                                 | GP_MASK(GP_IWSTR));
-        *GP_IMR_REG(GP_IRSTR) = (
-            (*GP_IMR_REG(GP_IRSTR)
-             & ~(GP_MASK(GP_ICER)
-                 | GP_MASK(GP_IRSTR)))
-            | (GP_MASK(GP_IHER)
-               | GP_MASK(GP_IWSTR)));
-
-        /* GPIO8 */
-        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
-        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
-
-        /* GPIO9 */
-        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
-        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
-        break;
-
-    case ALLOFF:
-        /* IFMK: F, ICER: F, IHER: F, IWSTR: F, IRSTR: F, IDBY: F */
-
-        /* GPIO6 */
-        *GP_IMR_REG(GP_IFMK) &= ~GP_MASK(GP_IFMK);
-
-        /* GPIO7 */
-        *GP_IMR_REG(GP_IRSTR) &= ~(
-            GP_MASK(GP_ICER)
-            | GP_MASK(GP_IHER)
-            | GP_MASK(GP_IWSTR)
-            | GP_MASK(GP_IRSTR));
-
-        /* GPIO8 */
-        *GP_IMR_REG(GP_IEOT) &= ~GP_MASK(GP_IEOT);
-
-        /* GPIO9 */
-        *GP_IMR_REG(GP_IDBY) &= ~GP_MASK(GP_IDBY);
-        break;
-
-    default:
-    case IDLE:
-        /* IFMK: T, ICER: T, IHER: T, IWSTR: T, IRSTR: T, IDBY: T */
-
-        /* GPIO6 */
-        *GP_ISR_REG(GP_IFMK) = GP_MASK(GP_IFMK);
-        *GP_IMR_REG(GP_IFMK) |= GP_MASK(GP_IFMK);
-
-        /* GPIO7 */
-        *GP_ISR_REG(GP_IRSTR) = (
-            GP_MASK(GP_ICER)
-            | GP_MASK(GP_IHER)
-            | GP_MASK(GP_IWSTR)
-            | GP_MASK(GP_IRSTR));
-        *GP_IMR_REG(GP_IRSTR) |= (
-            GP_MASK(GP_ICER)
-            | GP_MASK(GP_IHER)
-            | GP_MASK(GP_IWSTR)
-            | GP_MASK(GP_IRSTR));
-
-        /* GPIO8 */
-        *GP_ISR_REG(GP_IEOT) = GP_MASK(GP_IEOT);
-        *GP_IMR_REG(GP_IEOT) |= GP_MASK(GP_IEOT);
-
-        /* GPIO9 */
-        *GP_ISR_REG(GP_IDBY) = GP_MASK(GP_IDBY);
-        *GP_IMR_REG(GP_IDBY) |= GP_MASK(GP_IDBY);
-        break;
-    }
-}
 
 /*
  * Reset the Pertec interface by deasserting (setting) IFEN and
@@ -1695,10 +1621,97 @@ ieot_isr(void)
 #endif
 }
 
+#if 0
+/* Port expander interrupt */
+static void
+portexp_isr(void)
+{
+    pertexus_state_t        *pstatep;
+
+    pstatep = &pertexus_state;
+
+    pstatep->pexpintpend++;
+
+#if defined(OPT_INTCOUNTS)
+    pstatep->intcounts.portexp++;
+#endif
+}
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* Static functions (NORMAL).  These are medium-speed functions that
  *  should execute out of RAM */
+
+static void
+interrupts_init(pertexus_state_t *pstatep)
+{
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IRSTR)),
+                    &irstr_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IWSTR)),
+                    &iwstr_isr, RISING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IDBY)),
+                    &idby_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IFMK)),
+                    &ifmk_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_ICER)),
+                    &icer_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IHER)),
+                    &iher_isr, FALLING);
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_IEOT)),
+                    &ieot_isr, FALLING);
+#if 0
+    attachInterrupt(digitalPinToInterrupt(GP_PINNUM(GP_LPI2C4_INT)),
+                    &portexp_isr, FALLING);
+#endif
+}
+
+/*
+ * Set up interrupts for a particular operation
+ */
+static void
+interrupts_set(pertexus_state_t *pstatep, uint32_t intcfg)
+{
+    unsigned int        setnum, intidx;
+    uint32_t            imrval, isrval, newimrval;
+
+    /*
+     * For each of the GPIO set numbers we're using,
+     *  go through all possible interrupt configuration bits
+     *  and figure out new masks.
+     * Note the optimization: if we aren't turning any interrupts
+     *  on for a given GPIO we *don't* bother writing to GPIOnISR.
+     * Also, if we are not changing the interrupt mask we also
+     *  don't bother writing to GPIOnIMR.
+     * This might be over-optimization, but I'd like to avoid
+     *  glitching if possible.
+     */
+    for (setnum = GP_SETLOW; setnum <= GP_SETHIGH; setnum++) {
+        imrval = *GP_REGPTR(setnum, GP_REG_IMR_OFF);
+        isrval = 0;
+        newimrval = imrval;
+        for (intidx = 0; intidx < NELEM(intcfgmap); intidx++) {
+            if (intcfgmap[intidx].setnum == setnum) {
+                if ((intcfgmap[intidx].intcfg & intcfg) != 0) {
+                    /* We're turning this interrupt on */
+                    newimrval |= intcfgmap[intidx].bitmask;
+                    isrval |= intcfgmap[intidx].bitmask;
+                }
+                else {
+                    /* We're turning this interrupt off */
+                    newimrval &= ~intcfgmap[intidx].bitmask;
+                }
+            }
+        }
+        /* Did we turn on any interrupts that we should clear first? */
+        if (isrval != 0) {
+            *GP_REGPTR(setnum, GP_REG_ISR_OFF) = isrval;
+        }
+        /* Did we change the interrupt mask? */
+        if (newimrval != imrval) {
+            *GP_REGPTR(setnum, GP_REG_IMR_OFF) = newimrval;
+        }
+    }
+}
 
 /*
  * Port expander primitive functions.  Reference: [7]
@@ -1728,19 +1741,24 @@ ieot_isr(void)
 static unsigned int
 portexp_read(pertexus_state_t *pstatep, int portnum)
 {
-    unsigned int         retval;
+    uint8_t              readval;
+    unsigned int         retval, baseport;
 
     pstatep->portexp->beginTransmission(PCA9535_ADDR);
-    pstatep->portexp->write(byte(portnum <= 0 ?
-                                 PCA9535_CMD_INP0 : PCA9535_CMD_INP1));
+    baseport = (portnum <= 0 ? PCA9535_CMD_INP0 : PCA9535_CMD_INP1);
+    pstatep->portexp->write(byte(baseport));
     pstatep->portexp->endTransmission();
 
     pstatep->portexp->requestFrom(PCA9535_ADDR, portnum < 0 ? 2 : 1);
 
-    retval = (unsigned int) pstatep->portexp->read();
+    readval = (unsigned int) pstatep->portexp->read();
+    pstatep->pexpregs[baseport] = readval;
+    retval = readval;
 
     if (portnum < 0) {
-        retval |= (unsigned int) pstatep->portexp->read() << 8;
+        readval = (unsigned int) pstatep->portexp->read();
+        pstatep->pexpregs[PCA9535_CMD_INP1] = readval;
+        retval |= (readval << 8);
     }
 
     return retval;
@@ -1751,7 +1769,7 @@ static void
 portexp_write(pertexus_state_t *pstatep, unsigned int bytenum, unsigned int val)
 {
     /* Keep the cached value */
-    pstatep->pexpregs[bytenum - PCA9535_CMD_OUTP0] = (uint8_t) val;
+    pstatep->pexpregs[bytenum] = (uint8_t) val;
 
     pstatep->portexp->beginTransmission(PCA9535_ADDR);
     pstatep->portexp->write(byte(bytenum));
@@ -1824,6 +1842,45 @@ bitwait(volatile uint32_t *regp, uint32_t bitmask, bool_t bitset,
 }
 
 /*
+ * Convert a hexadecimal string to binary.
+ */
+static unsigned int
+atohex(const char *strp)
+{
+    unsigned int     retval;
+    char             ch;
+
+    if (*strp == '0' && (*(strp+1) == 'x'
+                         || *(strp+1) == 'X')) {
+        /* Skip leading 0x */
+        strp += 2;
+    }
+    retval = 0;
+    while (*strp != '\0') {
+        ch = *strp;
+        if (ch >= '0' && ch <= '9') {
+            ch -= '0';
+        }
+        else if (ch >= 'a' && ch <= 'f') {
+            ch -= 'a';
+            ch += 10;
+        }
+        else if (ch >= 'A' && ch <= 'F') {
+            ch -= 'A';
+            ch += 10;
+        }
+        else {
+            break;
+        }
+        retval <<= 4;
+        retval |= ch;
+        strp++;
+    }
+
+    return retval;
+}
+
+/*
  * Commands:
  */
 
@@ -1839,6 +1896,57 @@ cmd_echo(cmdif_t *cmdifp, int argc, char **argv)
         }
     }
     cmdifp->outstreamp->print(F("\r\n"));
+}
+
+/*
+ * Peek a hex address and read the byte therein.
+ */
+static void
+cmd_peek(cmdif_t *cmdifp, int argc, char **argv)
+{
+    uint32_t             readval;
+    unsigned int         regaddr;
+    Stream              *outstreamp;
+
+    outstreamp = cmdifp->outstreamp;
+
+    if (argc < 2) {
+        outstreamp->print(F("Usage: peek address-in-hex\r\n"));
+    }
+    else {
+        regaddr = atohex(argv[1]);
+        hexprint32(outstreamp, regaddr, 8);
+        outstreamp->print(F(": "));
+        readval = *((volatile uint32_t *) regaddr);
+        hexprint32(outstreamp, readval, 8);
+        outstreamp->print(F("\r\n"));
+    }
+}
+
+/*
+ * Poke a value to a hex address
+ */
+static void
+cmd_poke(cmdif_t *cmdifp, int argc, char **argv)
+{
+    unsigned int         regaddr, regval;
+    Stream              *outstreamp;
+
+    outstreamp = cmdifp->outstreamp;
+
+    if (argc != 3) {
+        outstreamp->print(
+            F("Usage: poke address-in-hex value-in-hex\r\n"));
+    }
+    else {
+        regaddr = atohex(argv[1]);
+        regval = atohex(argv[2]);
+        *((volatile uint32_t *) regaddr) = (uint32_t) regval;
+        hexprint32(outstreamp, regaddr, 8);
+        outstreamp->print(F(" <- "));
+        hexprint32(outstreamp, regval, 8);
+        outstreamp->print(F("\r\n"));
+    }
 }
 
 /*
@@ -2045,6 +2153,10 @@ cmd_stats(cmdif_t *cmdifp, int argc, char **argv)
 
     outstreamp->print(F("intcounts.ieot = "));
     outstreamp->println(pstatep->intcounts.ieot);
+#if 0
+    outstreamp->print(F("intcounts.portexp = "));
+    outstreamp->println(pstatep->intcounts.portexp);
+#endif
 #else
     outstreamp->println(F("Interrupt statistics not being kept"));
 #endif
@@ -2173,7 +2285,7 @@ usage:
         goto fail1;
     }
 
-    interrupts_set(pstatep, ALLOFF);
+    interrupts_set(pstatep, INTCFG_ALLOFF);
 
     /* Turn off interrupts and go to town. */
     while (nrecsleft != 0) {
@@ -2355,7 +2467,7 @@ cmd_write(cmdif_t *cmdifp, int argc, char **argv)
     filedone = FALSE;
     trp = NULL;
 
-    interrupts_set(pstatep, WRITING);
+    interrupts_set(pstatep, INTCFG_WRITING);
     /* turn off timer interrupts */
 #if 0
     timsk0_saved = TIMSK0;
@@ -2621,7 +2733,8 @@ cmd_write(cmdif_t *cmdifp, int argc, char **argv)
 static void
 cmd_read(cmdif_t *cmdifp, int argc, char **argv)
 {
-    File             writefile;
+    File            *writefile;
+    File             tmpfile, outfile;
     recsize_t        recsofar, reclen;
     uint32_t         zeroword;
     uint32_t         header, lastfooteroff, nerrs, nbytes;
@@ -2635,12 +2748,13 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
     uint8_t         *rdptr, *wrptr;
     uint16_t         writesize, lastwritesize;
     int              val;
-    bool_t           seenend;
+    bool_t           seenend, rev;
     int              inchar;
     tape_rec_t      *trp;
     Stream          *streamp;
     bool_t           nofile;
     pertexus_state_t    *pstatep;
+    char             tmpfn[TMPFNLEN+1];
     const char      *outfn;
 
     pstatep = FROMWITHIN(cmdifp, pertexus_state_t, cmdif);
@@ -2655,6 +2769,7 @@ cmd_read(cmdif_t *cmdifp, int argc, char **argv)
     outfn = NULL;
     nofile = FALSE;
     seenend = FALSE;
+    rev = FALSE;
 
     while (argc != 0) {
         if (strcmp_P(*argv, PSTR("-")) == 0) {
@@ -2697,6 +2812,9 @@ errend:
                 pstatep->filesleft = val;
                 seenend = TRUE;
             }
+            else if (strcmp_P(*argv, PSTR("-rev")) == 0) {
+                rev = TRUE;
+            }
             else {
                 streamp->print(F("unknown flag "));
                 streamp->println(*argv);
@@ -2716,16 +2834,26 @@ errend:
 
     if (outfn == NULL && !nofile) {
 usage:
-        streamp->println(F("usage: read [-eot|-nfiles n] [-|tape-image-file]"));
+        streamp->println(
+            F("usage: read [-rev] [-eot|-nfiles n] [-|tape-image-file]"));
         return;
     }
 
     /* Default to double EOF terminating our read */
     if (!seenend) {
-        pstatep->filesleft = -2;        /* Magic value to indicate
-                                         *  we're looking for two
-                                         *  consecutive EOFs with
-                                         *  no intervening data */
+        if (rev) {
+            /* By default we read to the beginning of tape, unless
+             *  specified otherwise (reading backwards is confusing --
+             *  the file mark comes before the data).
+             */
+            pstatep->filesleft = -1;    /* Read to beginning of tape */
+        }
+        else {
+            pstatep->filesleft = -2;        /* Magic value to indicate
+                                             *  we're looking for two
+                                             *  consecutive EOFs with
+                                             *  no intervening data */
+        }
     }
 
     if (!nofile) {
@@ -2736,24 +2864,34 @@ usage:
             }
         }
 
-#if 0
-        streamp->print(F("Creating contiguous file "));
-        streamp->print(prealloc, DEC);
-        streamp->print(F(" bytes long..."));
+        outfile = pstatep->sdp->open(outfn, FILE_WRITE);
 
-        if (!writefile.createContiguous(&(pstatep->root),
-                                        outfn, prealloc)) {
+        if (!outfile) {
             streamp->println(F("unable to open file"));
             return;
         }
-        streamp->println(F("done"));
-#else
-        writefile = pertexus_state.sdp->open(outfn, FILE_WRITE);
-        if (!writefile) {
-            streamp->println(F("unable to open file"));
-            return;
+
+        if (rev) {
+            /* For a reverse read we read first into a temporary
+             *  file. */
+            if (!tmpfn_gen(pstatep->sdp, &(tmpfn[0]))) {
+                streamp->println(F("unable to generate temporary file name"));
+                return;
+            }
+            tmpfile = pstatep->sdp->open(tmpfn, FILE_WRITE);
+            if (!tmpfile) {
+                streamp->println(F("unable to create temporary file"));
+                outfile.close();
+                return;
+            }
+            writefile = &tmpfile;
         }
-#endif
+        else {
+            writefile = &outfile;
+        }
+    }
+    else {
+        writefile = NULL;
     }
 
     /* Initialize our state */
@@ -2761,6 +2899,7 @@ usage:
     pstatep->rdptr = pstatep->wrptr = &(pstatep->buf[0]);
     pstatep->rdrec = pstatep->wrrec = 0;
     pstatep->filesdone = pstatep->recsdone = 0;
+    pstatep->startcmd = rev ? PCMD_IREV : 0;
     recsofar = 0;
     lastfooteroff = 0;  /* offset past last valid footer */
     zeroword = 0;
@@ -2768,7 +2907,9 @@ usage:
 
     trp = NULL;
 
-    interrupts_set(pstatep, READING);
+    /* Clear any pending port expander interrupt */
+    (void) portexp_read(pstatep, -1);
+    interrupts_set(pstatep, INTCFG_READING);
 #if 0
     /* turn off timer interrupts */
     timsk0_saved = TIMSK0;
@@ -2849,14 +2990,15 @@ usage:
                  *  fill this in afterwards.
                  */
 
-                if (!nofile && writefile.write(&zeroword, sizeof(uint32_t))
-                    != sizeof(uint32_t)) {
+                if (writefile != NULL
+                    && writefile->write(&zeroword, sizeof(uint32_t))
+                       != sizeof(uint32_t)) {
                     goto writefail;
                 }
             }
 
             if (writesize > 0) {
-                if (!nofile) {
+                if (writefile != NULL) {
                     /*
                      * Limit the write size to whatever would get us
                      *  back to block alignment.  Because the SD card
@@ -2866,9 +3008,9 @@ usage:
                      *  data copying the SD card code does.
                      */
                     writesize = MIN(writesize,
-                                    (~((uint16_t) writefile.position())
+                                    (~((uint16_t) writefile->position())
                                      & (FILEBLKSIZ-1)) + 1);
-                    if (writefile.write(rdptr, writesize) != writesize) {
+                    if (writefile->write(rdptr, writesize) != writesize) {
                         goto writefail;
                     }
                 }
@@ -2887,7 +3029,7 @@ usage:
                 if (reclen != 0) {
                     uint8_t      postgap;
 
-                    if (!nofile) {
+                    if (writefile != NULL) {
                         /*
                          * First write dummy data to skip ahead to
                          *  an aligned (2-byte aligned) offset.  Note that
@@ -2896,7 +3038,7 @@ usage:
                          */
                         postgap = -((uint8_t) reclen) & 1;
                         if (postgap != 0) {
-                            if (writefile.write(&zeroword,
+                            if (writefile->write(&zeroword,
                                                 postgap) != postgap) {
                                 goto writefail;
                             }
@@ -2909,7 +3051,7 @@ usage:
                         header = ((trp->len & 0x00ffffff)
                                   | (trp->flags << 24));
 
-                        if (writefile.write(&header, sizeof(uint32_t))
+                        if (writefile->write(&header, sizeof(uint32_t))
                             != sizeof(uint32_t)) {
 writefail:
                             streamp->println(F("Failure when writing."));
@@ -2934,8 +3076,8 @@ writefail:
                  *  was a header with 0 in it.  This serves as
                  *  its own footer.
                  */
-                if (!nofile) {
-                    lastfooteroff = writefile.position();
+                if (writefile != NULL) {
+                    lastfooteroff = writefile->position();
                 }
 
                 /* Advance the ring buffer */
@@ -2962,6 +3104,7 @@ writefail:
             }
         }
 
+
         /*
          * Have we overrun?  If so then we need to abort.
          */
@@ -2983,7 +3126,7 @@ writefail:
             streamp->print(F("lastfooteroff = "));
             streamp->print(lastfooteroff, DEC);
             streamp->print(F(", position = "));
-            streamp->println(writefile.position(), DEC);
+            streamp->println(writefile->position(), DEC);
         }
         else if (pstatep->opstate == PERTEXUS_STATE_OPSTATE_EOT) {
             /*
@@ -2994,7 +3137,33 @@ writefail:
             ifreset(pstatep);
             pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
         }
+        else if (GP_READ(pstatep, GP_LPI2C4_INT) == 0) {
+            /*
+             * Were we reversing and saw a port expander interrupt?
+             *   It could be we've bumped into the BOT.
+             */
+            unsigned int         regval;
 
+            /* This asserts that the ILDP signal is on the port expander */
+            ASSERT_CT((GP_GROUP(GP_ILDP) & 1) != 0);
+
+            /*
+             * Read all of the port expander bits.  We do this to
+             *  guarantee that the interrupt line gets cleared.
+             */
+            regval = portexp_read(pstatep, -1);
+
+            /*
+             * Are we reading in reverse and the BOT is on?
+             */
+            if (rev && (regval & (1 << (GP_SETNUM(GP_ILDP) * 8
+                                        + GP_BITNUM(GP_ILDP)))) == 0) {
+                streamp->println(F("Terminating due to beginning of tape"));
+                /* !!! May not need to do this reset: */
+                ifreset(pstatep);
+                pstatep->opstate = PERTEXUS_STATE_OPSTATE_IDLE;
+            }
+        }
 
         /*
          * Now that we've made some space we can attempt to
@@ -3014,7 +3183,7 @@ writefail:
         }
     }
 
-    interrupts_set(pstatep, IDLE);
+    interrupts_set(pstatep, INTCFG_IDLE);
 
     /*
      * Finalize the file.  This involves truncating it
@@ -3022,38 +3191,35 @@ writefail:
      *  and going back and rewriting the record
      *  headers (which are all 0s right now).
      */
-    if (!nofile && lastfooteroff >= sizeof(uint32_t)) {
-#if 0
-        uint32_t         trashsize;
+    if (writefile != NULL) {  /* && lastfooteroff >= sizeof(uint32_t)) { */
+        unsigned int         trashsize, remnants;
 
         /*
          * First: truncate the file so that it extends only
          *  up to the last properly written footer.
          */
-        trashsize = writefile.position() - lastfooteroff;
+        writefile->flush();
+        trashsize = writefile->size() - lastfooteroff;
         if (trashsize > 0) {
-            streamp->print(F("Removing remnants of last record (final "));
+            streamp->print(F("Removing final "));
             streamp->print(trashsize, DEC);
-            streamp->println(F(" bytes of the file)."));
-            writefile.truncate(lastfooteroff);
-        }
-        else if (lastfooteroff < prealloc) {
-            /* Just silently truncate the preallocated space */
-            streamp->print(F("Attempting to truncate file from "));
-            streamp->print(prealloc, DEC);
-            streamp->print(F(" bytes down to "));
-            streamp->print(lastfooteroff, DEC);
-            streamp->print(F(" bytes (nuking "));
-            streamp->print(prealloc - lastfooteroff, DEC);
-            streamp->print(F(" bytes)..."));
-            if (!writefile.truncate(lastfooteroff)) {
-                streamp->println(F("failed"));
+            streamp->print(F(" bytes of file ("));
+
+            remnants = writefile->position() - lastfooteroff;
+            if (remnants > 0) {
+                streamp->print(remnants, DEC);
+                streamp->print(F(" bytes of partial final record"));
             }
-            else {
-                streamp->println(F("succeeded"));
+            if (trashsize > remnants) {
+                if (remnants > 0) {
+                    streamp->print(F(", "));
+                }
+                streamp->print(trashsize - remnants, DEC);
+                streamp->print(F(" bytes of old file data"));
             }
+            streamp->println(F(")"));
+            writefile->truncate(lastfooteroff);
         }
-#endif
 
         /*
          * Now go backward through the file, copying the
@@ -3061,58 +3227,21 @@ writefail:
          *  lastfooteroff normally points just past the
          *  footer.
          */
-        streamp->print(F("Finalizing file, filesize = "));
-        streamp->print(writefile.size(), DEC);
-        streamp->print(F(", current position = "));
-        streamp->print(writefile.position(), DEC);
-        streamp->print(F(", lastfooteroff = "));
-        streamp->println(lastfooteroff, DEC);
+        if (rev) {
+            (void) tapfilerev(pstatep, streamp, &outfile,
+                              &tmpfile, lastfooteroff);
+            outfile.close();
 
-        while (lastfooteroff >= sizeof(uint32_t)) {
-            lastfooteroff -= sizeof(uint32_t);
-            writefile.seek(lastfooteroff, SeekSet);
-            /* streamp->print(F(" seeking to read at ")); */
-            /* streamp->println(lastfooteroff, DEC); */
-
-            if (writefile.read(&header, sizeof(uint32_t)) !=
-                sizeof(uint32_t)) {
-                streamp->println(
-                    F("Error reading footers when finalizing file"));
-                break;
-            }
-            reclen = (recsize_t) (header & 0x00ffffff);
-            /* streamp->print(F(" read header = 0x")); */
-            /* hexprint32(streamp, header, 8); */
-            /* streamp->print(F(", reclen = ")); */
-            /* streamp->println(reclen, DEC); */
-
-            if (reclen == 0) {
-                /* It's just a marker with no footer.  Skip back. */
-            }
-            else {
-                /* Round up to an even record length so that
-                 *  headers and footers stay 16-bit aligned */
-                reclen = (reclen + 1) & ~1;
-                lastfooteroff -= (reclen + sizeof(uint32_t));
-                /* streamp->print(F(" seeking to write at ")); */
-                /* streamp->println(lastfooteroff, DEC); */
-                writefile.seek(lastfooteroff, SeekSet);
-                if (writefile.write(&header, sizeof(uint32_t))
-                    != sizeof(uint32_t)) {
-                    streamp->println(
-                        F("Error writing header when finalizing file"));
-                    break;
-                }
-            }
+            /* Close and delete the temporary file. */
+            tmpfile.close();
+            (void) pstatep->sdp->remove(tmpfn);
+        }
+        else {
+            (void) tapfilefinalize(pstatep, streamp, &outfile, lastfooteroff);
+            outfile.close();
         }
     }
-    else if (!nofile) {
-        writefile.truncate(lastfooteroff);
-    }
 
-    if (!nofile) {
-        writefile.close();
-    }
 #if 0
     /* turn timer interrupts back on again */
     TIMSK0 = timsk0_saved;
@@ -3497,22 +3626,19 @@ cmd_gpio(cmdif_t *cmdifp, int argc, char **argv)
         streamp->print(F("OUTP"));
         streamp->print(idx);
         streamp->print(F("  0x"));
-        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_OUTP0 + idx
-                                           - PCA9535_CMD_OUTP0], 2);
+        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_OUTP0 + idx], 2);
         streamp->println();
 
         streamp->print(F("INV"));
         streamp->print(idx);
         streamp->print(F("   0x"));
-        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_INV0 + idx
-                                           - PCA9535_CMD_OUTP0], 2);
+        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_INV0 + idx], 2);
         streamp->println();
 
         streamp->print(F("CFG"));
         streamp->print(idx);
         streamp->print(F("   0x"));
-        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_CFG0 + idx
-                                           - PCA9535_CMD_OUTP0], 2);
+        hexprint(streamp, pstatep->pexpregs[PCA9535_CMD_CFG0 + idx], 2);
         streamp->println();
     }
 
@@ -3686,7 +3812,7 @@ cmd_sd(cmdif_t *cmdifp, int argc, char **argv)
 
     if (argc < 2) {
 usage:
-        streamp->println(F("Usage: sd init|dir|read"));
+        streamp->println(F("Usage: sd init|dir|read|rm"));
         return;
     }
 
@@ -3697,6 +3823,18 @@ usage:
         File root = pstatep->sdp->open(PSTR("/"));
         /* !!!???error check */
         printDirectory(root, 0, streamp);
+    }
+    else if (strcmp_P(argv[1], PSTR("rm")) == 0) {
+        if (argc < 3) {
+            streamp->println(F("Usage: sd rm filename"));
+            return;
+        }
+
+        if (!pstatep->sdp->remove(argv[2])) {
+            streamp->print(F("Error: failed to remove "));
+            streamp->println(argv[2]);
+            return;
+        }
     }
     else if (strcmp_P(argv[1], PSTR("read")) == 0) {
         File          readfile;
@@ -3712,7 +3850,7 @@ usage:
             return;
         }
 
-        readfile = pertexus_state.sdp->open(argv[2], FILE_READ);
+        readfile = pstatep->sdp->open(argv[2], FILE_READ);
 
         if (!readfile) {
             streamp->println(F("unable to open file"));
@@ -3992,7 +4130,7 @@ gpios_init(pertexus_state_t *pstatep)
             ninregs++;
         }
     }
-    pertexus_state.ninregs = ninregs;
+    pstatep->ninregs = ninregs;
 
     CHECKPOINT("#3");
 #if 1
@@ -4028,7 +4166,7 @@ gpios_init(pertexus_state_t *pstatep)
     CHECKPOINT("#4");
 
     /* Set IFEN */
-    GP_WRITE(&pertexus_state, GP_IFEN, 0);
+    GP_WRITE(pstatep, GP_IFEN, 0);
 }
 
 
@@ -4036,7 +4174,7 @@ gpios_init(pertexus_state_t *pstatep)
  * Print out all of the state.
  */
 static void
-debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp)
+debug_dumpstate(pertexus_state_t *pstatep, Print *outstreamp)
 {
     unsigned int         nbytes, baseoff, off;
     uint8_t             byteval;
@@ -4147,7 +4285,7 @@ debug_dumpstate(pertexus_state_t *pstatep, Stream *outstreamp)
  * Initialize the connection to the SD card.
  */
 static bool_t
-sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
+sdcard_init(pertexus_state_t *pstatep, Print *streamp)
 {
     streamp->print(F("\nInitializing SD card..."));
 
@@ -4164,12 +4302,15 @@ sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
     else {
         streamp->println(F("Wiring is correct and a card is present."));
     }
-#if 0
+
+    streamp->print(F("FAT type: "));
+    pstatep->sdp->sdfs.printFatType(streamp);
+
     // print the type of card
     streamp->println();
     streamp->print(F("Card type:         "));
 
-    switch (pstatep->sdp->sdfs.type()) {
+    switch (pstatep->sdp->sdfs.card()->type()) {
     case SD_CARD_TYPE_SD1:
         streamp->println(F("SD1"));
         break;
@@ -4186,15 +4327,14 @@ sdcard_init(pertexus_state_t *pstatep, Stream *streamp)
         streamp->println(F("Unknown"));
         break;
     }
-#endif
 
-    pertexus_state.sdcardinit = TRUE;
+    pstatep->sdcardinit = TRUE;
 
     return TRUE;
 }
 
 static void
-printDirectory(File dir, int numSpaces, Stream *outstreamp)
+printDirectory(File dir, int numSpaces, Print *outstreamp)
 {
     File        entry;
 
@@ -4224,7 +4364,7 @@ printDirectory(File dir, int numSpaces, Stream *outstreamp)
 }
 
 static void
-printSpaces(int num, Stream *outstreamp)
+printSpaces(int num, Print *outstreamp)
 {
     for (int i=0; i < num; i++) {
         outstreamp->print(' ');
@@ -4232,7 +4372,7 @@ printSpaces(int num, Stream *outstreamp)
 }
 
 static void
-printTime(const DateTimeFields tm, Stream *outstreamp,
+printTime(const DateTimeFields tm, Print *outstreamp,
           bool_t printwday, bool_t printsecs)
 {
     if (printwday) {
@@ -4284,7 +4424,7 @@ printTime(const DateTimeFields tm, Stream *outstreamp,
  * Print out a string, with optional trailing padding.
  */
 static void
-printpad(Stream *streamp, const char *strp, int padlen)
+printpad(Print *streamp, const char *strp, int padlen)
 {
     char         strc;
 
@@ -4313,7 +4453,7 @@ printpad(Stream *streamp, const char *strp, int padlen)
  *  to use as many digits as needed.
  */
 static void
-hexprint(Stream *outstream, unsigned int val, int ndigits)
+hexprint(Print *outstream, unsigned int val, int ndigits)
 {
 #if 1
     /* The loop version */
@@ -4353,7 +4493,7 @@ hexprint(Stream *outstream, unsigned int val, int ndigits)
 /* This function is called from debugging code so it may
  *  not be needed.  Hence the 'pragma' */
 static void
-hexprint32(Stream *outstream, uint32_t val, int ndigits)
+hexprint32(Print *outstream, uint32_t val, int ndigits)
 {
 #if 1
     /* The loop version */
@@ -4395,4 +4535,236 @@ getTeensy3Time(void)
     return Teensy3Clock.get();
 }
 
+/*
+ * Set up the chip to support communication two/from the
+ *  PCA9535 port expander.
+ */
+static void
+pca9535_init(pertexus_state_t *pstatep)
+{
+    pstatep->portexp = &Wire2;
+    pstatep->sdp = &SD;
+
+    /*
+     * First, setup the I2C to communicate with the
+     *  port expander.
+     */
+    pstatep->portexp->begin();
+    pstatep->portexp->setClock(400000);
+
+    /*
+     * Now, set up the INT GPIO line as an input.
+     */
+    pinMode(GP_PINNUM(GP_LPI2C4_INT), INPUT_PULLUP);
+}
+
+/*
+ * Cook up a temporary filename on the given FS.
+ *  bufp should point to at least 13 bytes (TMPFNLEN+1) of storage.
+ */
+static bool_t
+tmpfn_gen(FS *fsp, char *bufp)
+{
+    char            *nump;
+    unsigned int     idx, divisor, tmp;
+
+    strcpy_P(bufp, PSTR("TEMP0000.TMP"));
+
+    idx = 0;
+    do {
+        nump = &(bufp[4]);
+        divisor = 1000;
+        tmp = idx;
+        do {
+            *nump++ = '0' + (tmp / divisor);
+            tmp = tmp % divisor;
+            divisor /= 10;
+        }
+        while (divisor != 0);
+
+        if (!fsp->exists(bufp)) {
+            return TRUE;
+        }
+    } while (idx < 10000);
+
+    return FALSE;
+}
+
+/*
+ * Copy the (already open) TAP file to a reversed
+ *  data file.
+ */
+
+static bool_t
+tapfilerev(pertexus_state_t *pstatep, Print *outprintp,
+           File *writefile, File *tmpfile, uint32_t lastfooteroff)
+{
+    uint32_t     header, reclen, chunksize, swapcount;
+    uint8_t     *rdp, *wrp;
+    File        newfile;
+
+    outprintp->print(F("Reversing file, filesize = "));
+    outprintp->print(tmpfile->size(), DEC);
+    outprintp->print(F(", current position = "));
+    outprintp->print(tmpfile->position(), DEC);
+    outprintp->print(F(", lastfooteroff = "));
+    outprintp->println(lastfooteroff, DEC);
+
+    /*
+     * Go back, record by record, and reverse the data.
+     */
+
+    while (lastfooteroff >= sizeof(uint32_t)) {
+        lastfooteroff -= sizeof(uint32_t);
+        tmpfile->seek(lastfooteroff, SeekSet);
+
+        if (tmpfile->read(&header, sizeof(uint32_t)) !=
+            sizeof(uint32_t)) {
+            outprintp->println(F("Error reading footers when reversing file"));
+            return FALSE;
+        }
+#if 0
+        outprintp->print(F("Read header at "));
+        outprintp->print(lastfooteroff);
+        outprintp->print(F(", value = 0x"));
+        hexprint32(outprintp, header, 8);
+#endif
+
+        /*
+         * Yuck.  Read bytes, 2 at a time, and write them
+         *  back out again.
+         */
+        if (writefile->write(&header, sizeof(header))
+            != sizeof(uint32_t)) {
+            outprintp->println(F("Error writing header to reversed file"));
+            return FALSE;
+        }
+
+        reclen = (recsize_t) (header & 0x00ffffff);
+
+        if (reclen == 0) {
+            /* It's just a marker with no footer.  Skip back. */
+            continue;
+        }
+        /* Convert reclen to a multiple of 2 */
+        reclen = (reclen + 1) & ~1;
+
+        /* Read the bytes, chunk at a time */
+        while (reclen != 0) {
+            chunksize = MIN(reclen, TAPEBUFSIZ/2);
+            lastfooteroff -= chunksize;
+
+            if (!tmpfile->seek(lastfooteroff, SeekSet)) {
+                outprintp->print(F("error: unable to seek to "));
+                outprintp->print(lastfooteroff);
+                outprintp->println(F(" in temporary file"));
+                return FALSE;
+            }
+
+            if (tmpfile->read(&(pstatep->buf[0]), chunksize) != chunksize) {
+                outprintp->print(F("error: unable to read data at "));
+                outprintp->print(lastfooteroff);
+                outprintp->println(F(" from temporary file"));
+                return FALSE;
+            }
+
+            /*
+             * Rewrite the data.
+             */
+            swapcount = chunksize;
+            rdp = &(pstatep->buf[chunksize]);
+            wrp = &(pstatep->buf[TAPEBUFSIZ/2]);
+
+            while (swapcount-- != 0) {
+                *wrp++ = *--rdp;
+            }
+
+            if (writefile->write(&(pstatep->buf[TAPEBUFSIZ/2]), chunksize)
+                != chunksize) {
+
+                outprintp->print(
+                    F("error: unable to write data from temporary file at "));
+                outprintp->print(lastfooteroff);
+                outprintp->println(F(" to reversed file"));
+                return FALSE;
+            }
+
+            reclen -= chunksize;
+        }
+
+        /* Now skip back over the gap in the temporary
+         *  file where the header was supposed to go. */
+        lastfooteroff -= sizeof(uint32_t);
+
+        /* And write another copy of the footer */
+
+        if (writefile->write(&header, sizeof(header))
+            != sizeof(header)) {
+            outprintp->println(
+                F("error: unable to write footer to reversed file"));
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+/*
+ * "Finalize" a TAP file by walking backwards through it to
+ *  fill in the headers (which were written as 0s) with copies
+ *  of the footers.
+ */
+
+static bool_t
+tapfilefinalize(pertexus_state_t *pstatep, Print *outprintp,
+                File *writefile, uint32_t lastfooteroff)
+{
+    uint32_t         header, reclen;
+
+    outprintp->print(F("Finalizing file, filesize = "));
+    outprintp->print(writefile->size(), DEC);
+    outprintp->print(F(", current position = "));
+    outprintp->print(writefile->position(), DEC);
+    outprintp->print(F(", lastfooteroff = "));
+    outprintp->println(lastfooteroff, DEC);
+
+    while (lastfooteroff >= sizeof(uint32_t)) {
+        lastfooteroff -= sizeof(uint32_t);
+        writefile->seek(lastfooteroff, SeekSet);
+        /* outprintp->print(F(" seeking to read at ")); */
+        /* outprintp->println(lastfooteroff, DEC); */
+
+        if (writefile->read(&header, sizeof(uint32_t)) != sizeof(uint32_t)) {
+            outprintp->println(F("Error reading footers when finalizing file"));
+            return FALSE;
+        }
+
+        reclen = (recsize_t) (header & 0x00ffffff);
+        /* outprintp->print(F(" read header = 0x")); */
+        /* hexprint32(streamp, header, 8); */
+        /* outprintp->print(F(", reclen = ")); */
+        /* outprintp->println(reclen, DEC); */
+
+        if (reclen == 0) {
+            /* It's just a marker with no footer.  Skip back. */
+            continue;
+        }
+
+        /* Round up to an even record length so that
+         *  headers and footers stay 16-bit aligned */
+        reclen = (reclen + 1) & ~1;
+        lastfooteroff -= (reclen + sizeof(uint32_t));
+        /* outprintp->print(F(" seeking to write at ")); */
+        /* outprintp->println(lastfooteroff, DEC); */
+
+        writefile->seek(lastfooteroff, SeekSet);
+
+        if (writefile->write(&header, sizeof(uint32_t)) != sizeof(uint32_t)) {
+            outprintp->println(F("Error writing header when finalizing file"));
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
 
