@@ -8,7 +8,7 @@ INCLUDEDIRS="$(ARDUINOROOT)/hardware/teensy/avr/cores/teensy4" \
 	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/Time"
 INCLUDES=$(shell echo $(INCLUDEDIRS) | xargs -n 1 cygpath -m | \
 	    xargs -I x echo -I\'x\')
-TEMPDIR=$(shell cygpath C:\Users\bkd\AppData\Local\Temp\arduino_build_355919)
+TEMPDIR=$(shell cygpath C:\Users\bkd\AppData\Local\Temp\arduino_build_559794)
 
 ARMGCC=$(GCCTOOLS)/bin/arm-none-eabi-g++
 ARMOBJDUMP=$(GCCTOOLS)/bin/arm-none-eabi-objdump
@@ -33,6 +33,6 @@ CFLAGS_CPP=-O2 -g -Wall -ffunction-sections -fdata-sections -nostdlib \
 
 pertexusfw.dmp: $(TEMPDIR)/pertexusfw.ino.elf
 #	$(AVROBJDUMP) -hxasdt -lS -C "$(shell cygpath -w $<)" > $@
-	$(ARMOBJDUMP) -hxasdt -C "$(shell cygpath -w $<)" > $@
-	$(ARMNM) --print-size --demangle --numeric-sort \
-			    "$(shell cygpath -w $<)" >> $@
+	($(ARMOBJDUMP) -hxasdt -C "$(shell cygpath -w $<)" ;	    \
+         $(ARMNM) --print-size --demangle --numeric-sort	    \
+	    "$(shell cygpath -w $<)") | dos2unix > $@
