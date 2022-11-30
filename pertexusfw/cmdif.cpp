@@ -120,16 +120,17 @@ cmdif_cmd_help(cmdif_t *cmdifp, int argc, char **argv)
         }
     }
     else {
-        for (idx = 1; idx < argc; idx++) {
-            cmdentryp = cmdif_lookup(cmdifp, argv[idx]);
-            if (cmdentryp == NULL) {
-                outstreamp->print(F("Unknown command: "));
-                outstreamp->println(argv[0]);
-            }
-            else {
-                outstreamp->print(cmdentryp->cmdname);
-                outstreamp->print(cmdentryp->fullhelp);
-            }
+        cmdentryp = cmdif_lookup(cmdifp, argv[1]);
+        if (cmdentryp == NULL) {
+            outstreamp->print(F("Unknown command: "));
+            outstreamp->println(argv[1]);
+        }
+        else if (cmdentryp->fullhelp != NULL) {
+            outstreamp->println(cmdentryp->fullhelp);
+        }
+        else {
+            outstreamp->print(F("No further help available for command "));
+            outstreamp->println(argv[1]);
         }
     }
 }
