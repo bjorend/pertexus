@@ -209,11 +209,11 @@ We'll group the Pertec signals as
         ITAD0, IFEN, IOFL, ITAD1, IFAD, IDEN
 
     Mode                    DIRA  OEA   DIRB    Group A         Group B
-    controller active       L     L     H       input           output          
-    controller inactive     L     L     L       don't care      don't care      
-    analyzer                L     L     L       input           input           
-    peripheral inactive     H     H     L       don't care      input           
-    peripheral active       H     L     L       output          input           
+    controller active       L     L     H       input           output
+    controller inactive     L     L     L       don't care      don't care
+    analyzer                L     L     L       input           input
+    peripheral inactive     H     H     L       don't care      input
+    peripheral active       H     L     L       output          input
 
 Group B signals always have OE enabled because the transition from
 undriven to driven (input to output) happens only rarely -- it's not
@@ -229,7 +229,7 @@ Actually, Group A should be further subdivided into A0 and A1
         IFBY, IR2, IR3, IRP, IR0, IR1, ILDP, IR4, IR7, IR6, IHER,
         IFMK, IDENT, IR5, IEOT, INRZ, IRDY, IRSTR, IWSTR,
         IDBY, ICER
-        
+
 Happily all of Group A0 lines are on the fully-controllable PCA9353DBR
 
 May 22, 2022
@@ -340,7 +340,7 @@ Current consumption
         input terminators, attached to
         powered tape drive                          410 mA
         but the USB connection disconnects
-        
+
 I'm wondering if the inputs are flapping and that's why I'm burning
 power.  Ugh.  I should have put weak pullups on all of the signals.
 
@@ -527,3 +527,266 @@ the end of February if one of {year, year + 70} is a leap year but the
 other is not.
 
 I sent an email to Paul at pjrc.com and I've fixed it locally.
+
+June 8, 2022
+------------
+
+I thought I'd get brave and try to re-read TAPE7.
+
+I got a lot further this time:
+
+    PERTEXUS> stats
+    intcounts.icer = 0
+    intcounts.iher = 0
+    intcounts.iwstr = 0
+    intcounts.irstr = 0
+    intcounts.idby = 0
+    intcounts.ifmk = 0
+    PERTEXUS> read tape7r5.tap
+    Terminating due to overrun
+    opstate = 0
+    fmcount = 0
+    rdrec = 1, wrrec = 2, ISEMPTY = 0, ISFULL = 0
+    base = 0x200031B8, rdptr = 0x20003D30, wrptr = 0x20003D2E, FREE = 1, USED = 4094, ISEMPTY = 0, ISFULL = 0
+    harderrcount = 0
+    recbytes = 2403
+    filesdone = 1
+    recsdone = 656
+    0000 20003D30:   00 4B 49 6D 6F 76 7A 77 6C C1 27 2C 49 0A 4D CA   |.KImovzwl.',I.M.|
+    0010 20003D40:   2C 49 2C 49 0A 63 76 74 6C 77 C9 2C 41 27 27 0A   |,I,I.cvtlw.,A''.|
+    0020 20003D50:   00 4B 49 63 76 74 43 6C C1 27 2C 49 0A 4D CA 2C   |.KIcvtCl.',I.M.,|
+    .
+    .
+    .
+
+    ....|
+    0FE0 20003D10:   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   |................|
+    0FF0 20003D20:   00 00 00 00 00 00 00 00 00 00 00 00 00 00         |..............  |
+    writesize = 1, lastwritesize = 1
+    lastfooteroff = 5531016, position = 5537793
+    Attempting to truncate file from 62914560 bytes down to 5539488 bytes (nuking 57375072 bytes)...succeeded
+    Finalizing file, filesize = 5539488, current position = 5539488, lastfooteroff = 5539488
+    Total of 657 records in 1 files
+    PERTEXUS> sd dir
+    System Volume Information/
+      WPSettings.dat                                   12    Apr 11 14:01 2022
+      IndexerVolumeGuid                                76    Apr 11 14:01 2022
+    BB-3077D-SC_RSX-11M+_V3.0_SRC_1985.tap        9966532    Sep 12 20:17 2012
+    TEST1.TAP                                     1017000    Jan  1  1:00 2000
+    TAPE4P1.TAP                                    398640    Jan  1  1:00 2000
+    TAPE4P2.TAP                                   3222968    Jan  1  1:00 2000
+    TAPE4P3.TAP                                    164328    Jan  1  1:00 2000
+    TAPE01.TAP                                    1423248    Jan  1  1:00 2000
+    TAPE4P4.TAP                                         4    Jan  1  1:00 2000
+    TAPE7.TAP                                      483172    Jan  1  1:00 2000
+    TAPE7R2.TAP                                    203596    Jan  1  1:00 2000
+    TAPE7R3.TAP                                   1447510    Jan  1  1:00 2000
+    TAPE7R4.TAP                                   1659046    Jan  1  1:00 2000
+    test1x.tap                                    1017004    Jun  7 19:57 2022
+    TAPE01R2.TAP                                  1423248    Jan  1  1:00 2000
+    tape7r5.tap                                   5539488    Jun  8 18:52 2022
+    PERTEXUS> rewind
+    PERTEXUS> stats
+    intcounts.icer = 0
+    intcounts.iher = 76
+    intcounts.iwstr = 0
+    intcounts.irstr = 5538724
+    intcounts.idby = 1318
+    intcounts.ifmk = 0
+    PERTEXUS> unload
+
+That's 5 MB.  I can't tell where the IHER interrupts came from.
+
+I increased TAPEBUFSIZ from 4096 to 32768 and TAPENRECS from 8 to 16
+and was able to read the whole tape:
+
+    PERTEXUS> read tape7r6.tap
+    Finalizing file, filesize = 12038458, current position = 12038458, lastfooteroff = 12038458
+    Total of 12026939 bytes in 1437 records (149 records with errors) in 4 files
+    PERTEXUS> rewind
+    PERTEXUS> stats
+    intcounts.icer = 0
+    intcounts.iher = 149
+    intcounts.iwstr = 0
+    intcounts.irstr = 12026939
+    intcounts.idby = 2882
+    intcounts.ifmk = 0
+    PERTEXUS> unload
+    PERTEXUS> 
+
+I realized I had a bug in my code wherein I was not recording the fact
+that a record that was read had an error.  So I fixed that and tried
+again:
+
+    PERTEXUS> read tape7r7.tap
+    Finalizing file, filesize = 12130894, current position = 12130894, lastfooteroff = 12130894
+    Total of 12119381 bytes in 1437 records (3 records with errors) in 4 files
+    PERTEXUS> stats
+    intcounts.icer = 0
+    intcounts.iher = 3
+    intcounts.iwstr = 0
+    intcounts.irstr = 12119381
+    intcounts.idby = 2882
+    intcounts.ifmk = 0
+    PERTEXUS> rewind
+    PERTEXUS> 
+
+Strange that the results should get better after multiple reads.
+
+Let me try one more cleaning of the heads and another read to see if I
+can get even better.
+
+    PERTEXUS> read tape7r8.tap
+    Finalizing file, filesize = 12130894, current position = 12130894, lastfooteroff = 12130894
+    Total of 12119381 bytes in 1437 records (2 records with errors) in 4 files
+    PERTEXUS> rewind
+[did not clean heads]    
+    PERTEXUS> read tape7r9.tap
+    Finalizing file, filesize = 12130888, current position = 12130888, lastfooteroff = 12130888
+    Total of 12119376 bytes in 1437 records (2 records with errors) in 4 files
+    PERTEXUS> rewind
+[cleaned heads]
+    PERTEXUS> read tape7r10.tap
+    Finalizing file, filesize = 12130894, current position = 12130894, lastfooteroff = 12130894
+    Total of 12119381 bytes in 1437 records (2 records with errors) in 4 files
+    PERTEXUS> unload
+    PERTEXUS> 
+
+I went on to try again to read what exists later on on the tape:
+
+    PERTEXUS> read tape7r11.tap
+    Finalizing file, filesize = 12130894, current position = 12130894, lastfooteroff = 12130894
+    Total of 12119381 bytes in 1437 records (2 records with errors) in 4 files
+    PERTEXUS> read tape7p3r1.tap
+    Finalizing file, filesize = 741846, current position = 741846, lastfooteroff = 741846
+    Total of 729054 bytes in 1342 records (1 records with errors) in 514 files
+    PERTEXUS> read tape7p4r1.tap
+    Finalizing file, filesize = 7520, current position = 7520, lastfooteroff = 7520
+    Total of 7344 bytes in 18 records (0 records with errors) in 8 files
+    PERTEXUS> read tape7p5r1.tap
+    Finalizing file, filesize = 540, current position = 540, lastfooteroff = 540
+    Total of 480 bytes in 6 records (0 records with errors) in 3 files
+    PERTEXUS> read tape7p6r1.tap
+    Finalizing file, filesize = 540, current position = 540, lastfooteroff = 540
+    Total of 480 bytes in 6 records (0 records with errors) in 3 files
+    PERTEXUS> read tape7p7r1.tap
+    Finalizing file, filesize = 597684, current position = 597684, lastfooteroff = 597684
+    Total of 593312 bytes in 494 records (0 records with errors) in 105 files
+    PERTEXUS> read tape7p8r1.tap
+    Finalizing file, filesize = 540, current position = 540, lastfooteroff = 540
+    Total of 480 bytes in 6 records (0 records with errors) in 3 files
+    PERTEXUS> read tape7p9r1.tap
+    Finalizing file, filesize = 441960, current position = 441960, lastfooteroff = 441960
+    Total of 439856 bytes in 253 records (0 records with errors) in 20 files
+    PERTEXUS> read tape7p10r1.tap
+    Finalizing file, filesize = 4, current position = 4, lastfooteroff = 4
+    Total of 0 bytes in 0 records (0 records with errors) in 1 files
+    PERTEXUS> read tape7p11r1.tap
+    Finalizing file, filesize = 4, current position = 4, lastfooteroff = 4
+    Total of 0 bytes in 0 records (0 records with errors) in 1 files
+    PERTEXUS> read tape7p12r1.tap
+    Finalizing file, filesize = 13733714, current position = 13733714, lastfooteroff = 13733714
+    Total of 13707957 bytes in 2393 records (2393 records with errors) in 1308 files
+    PERTEXUS> rewind
+
+I had to ^C at the end because I don't have end-of-tape detection (I
+should add that).
+
+June 9, 2022
+------------
+
+Some TODOs:
+    + Break out read and write FSM to separate classes
+    + Add sensitivity to EOT to 'read' command [done 6/9/2022]
+    + Add pullup resistors to DIRA, DIRB and OEA to try to avoid all
+      glitching (test by resetting board while attached to the drive)
+    + Add debug GPIO lines to measure interrupt latency/processing
+      time
+    + Add '-reverse' functionality to read command to allow backward
+      reading [done 6/10/2022]
+    + For read command: record corrected error counts
+
+June 11, 2022
+-------------
+
+I put pullups onto OEA and DIRB but I still see problems.
+
+The test case:
+    + power on the board
+    + power on the tape drive
+    + load a tape
+    + power off the board
+
+Looking at the signals I see the problem.  Powering the board off just
+causes all the control signals to drop.
+
+So what I'll try is to deselect the drive when we're not running a
+command.
+
+Just a note: the NOP command isn't really a NOP.  It's only a NOP if
+the file protect is not activated.  If the tape is file-protected it
+will cause a write error.  Grr...
+
+June 12, 2022
+-------------
+
+TODOs, updated:
+    + Break out read and write FSM to separate classes
+    + Add debug GPIO lines to measure interrupt latency/processing
+      time
+    + For read command: record corrected error counts
+    + For read command: add functionality that does a reverse read
+      immediately after seeing bad data (read retries)
+    + ECO: swap ILDP (on port expander) with IOFL or IREW.  This would
+      allow easy use of ILDP interrupts.  The general philosophy:
+      remove inputs from the port expander and replace them with
+      outputs.
+    + Figure out parasitic power.  Test case:
+        + board is off but connected to drive
+        + power on drive and load tape
+        + tape will immediately start to unload
+        + try same experiment but without board attached; tape will
+          load normally
+      We're doing something with the command lines that is causing the
+      drive to react.
+      Possibly 
+
+Experiments.
+
+Without power:
+
+    Teensy 4.1  J1  J2  Terminators     Drive loads?
+    Out         In  Out In              Okay
+    Out         In  In  In              Okay
+    In          In  In  In              Loads and then unloads
+    In          In  In  Out             Okay
+    
+So it's the presence of the teensy that is causing a problem.
+
+I guess that can only be if the Teensy is somehow being back-powered
+because otherwise its pins should appear to be floating (right)?
+
+I'm measuring the "Vin" pin on the Teensy and it's at 0.721 V.  The
+3.3V rail is 0.024 V.
+
+    R1      R2      R3      R4      Vin
+    In      In      In      In      0.721V
+    In      In      In      Out     0.927V
+    Out     In      In      Out     1.275V
+    Out     Out     In      Out     2.226V
+    Out     Out     Out     Out     2.261V
+
+If I remove the Teensy the voltage drops to ~0.8V .
+
+Checking all signal voltages with terminators removed, Teensy in
+place, and the drive powered up (but not loaded):
+
+    Signals above 1V:
+    
+    RN2:9 (IFPT) is at 3.6V
+    RN3:5 (ISPEED) is at 3.6V
+    RN3:6 (ICER) is at 1.4V
+    RN3:7 (IONL) is at 3.6V
+    
+    
+    
