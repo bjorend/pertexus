@@ -4007,15 +4007,15 @@ usage:
     }
     else if (strcmp_P(argv[1], PSTR("read")) == 0) {
         File          readfile;
-        uint32_t        header, footer, reclen;
-        unsigned long   nbytes, nrecs;
+        uint32_t        header, footer, reclen, recleft;
+        unsigned long   nbytes, nrecs, bytesread;
         unsigned long   starttime, deltatime;
         unsigned int    nfiles;
         uint16_t        readlen;
         uint8_t         buf[512];
 
         if (argc < 3) {
-            streamp->println(F("Usage: spi read filename"));
+            streamp->println(F("Usage: sd read filename"));
             return;
         }
 
@@ -4046,22 +4046,32 @@ usage:
                 nbytes += (unsigned long) reclen;
                 nrecs++;
 
-                while (reclen != 0) {
-                    if (reclen > sizeof(buf)) {
+                recleft = reclen;
+
+                while (recleft != 0) {
+                    if (recleft > sizeof(buf)) {
                         readlen = sizeof(buf);
                     }
                     else {
-                        readlen = (uint16_t) reclen;
+                        readlen = (uint16_t) recleft;
                     }
-                    if ((uint16_t) readfile.read(&(buf[0]), readlen)
-                        != readlen) {
-                        streamp->println(F("premature EOF"));
+                    bytesread = readfile.read(&(buf[0]), readlen);
+                    if ((uint16_t) bytesread != readlen) {
+                        streamp->print(F("premature EOF, expected "));
+                        streamp->print(readlen);
+                        streamp->print(F(" bytes, got "));
+                        streamp->print(bytesread);
+                        streamp->println(F(" bytes"));
                         readfile.close();
                         return;
                     }
-                    reclen -= (uint32_t) readlen;
+                    recleft -= (uint32_t) readlen;
                 }
 
+                /* Optionally skip a byte to keep headers 16-bit aligned */
+                if ((reclen & 1) != 0) {
+                    (void) readfile.seek(1, SeekCur);
+                }
 
                 if (readfile.read(&footer, sizeof(uint32_t))
                     != sizeof(uint32_t)) {
@@ -4070,7 +4080,11 @@ usage:
                     return;
                 }
                 if (footer != header) {
-                    streamp->println(F("warning: footer != header"));
+                    streamp->print(F("warning: footer (0x"));
+                    hexprint32(streamp, footer, 8);
+                    streamp->print(F(") != header (0x"));
+                    hexprint32(streamp, header, 8);
+                    streamp->println(F(")"));
                 }
             }
         }
