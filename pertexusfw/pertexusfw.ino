@@ -4821,6 +4821,7 @@ tmpfn_gen(FS *fsp, char *bufp)
         if (!fsp->exists(bufp)) {
             return TRUE;
         }
+        idx++;
     } while (idx < 10000);
 
     return FALSE;
