@@ -8,7 +8,7 @@ INCLUDEDIRS="$(ARDUINOROOT)/hardware/teensy/avr/cores/teensy4" \
 	"$(ARDUINOROOT)/hardware/teensy/avr/libraries/Time"
 INCLUDES=$(shell echo $(INCLUDEDIRS) | xargs -n 1 cygpath -m | \
 	    xargs -I x echo -I\'x\')
-TEMPDIR=$(shell cygpath C:\Users\bkd\AppData\Local\Temp\arduino_build_559794)
+TEMPDIR=$(shell cygpath C:\Users\bkd\AppData\Local\Temp\arduino_build_590050)
 
 ARMGCC=$(GCCTOOLS)/bin/arm-none-eabi-g++
 ARMOBJDUMP=$(GCCTOOLS)/bin/arm-none-eabi-objdump
@@ -35,4 +35,8 @@ pertexusfw.dmp: $(TEMPDIR)/pertexusfw.ino.elf
 #	$(AVROBJDUMP) -hxasdt -lS -C "$(shell cygpath -w $<)" > $@
 	($(ARMOBJDUMP) -hxasdt -C "$(shell cygpath -w $<)" ;	    \
          $(ARMNM) --print-size --demangle --numeric-sort	    \
-	    "$(shell cygpath -w $<)") | dos2unix > $@
+	    "$(shell cygpath -w $<)" ;				    \
+	 echo "Symbol table sorted by address" ;		    \
+	 $(ARMOBJDUMP) --syms --demangle "$(shell cygpath -w $<)" |   \
+	    perl -anle 'if ($$count++ < 3) { print $$_; } else { push @h, [hex($$F[0]), $$_];} END { print for map { $$_->[1] } sort { $$a->[0] <=> $$b->[0] } @h; }' \
+	) | dos2unix > $@
