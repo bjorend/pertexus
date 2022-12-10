@@ -1,0 +1,29 @@
+                      Pertec Adapater (Pertexus)
+                                bdb004
+                             Board Notes
+                             Bjoren Davis
+                           December 9, 2022
+
+Revision History
+----------------
+
+A0 - May 21, 2022
+    Taped out at OSHPARK but order cancelled
+    as "pertexus_bdb004_revA", order number 2Ap6n86K.
+
+A1 - June 1, 2022
+    Taped out at OSHPARK as "pertexus_bdb004_revA1", order number
+    QEPfTedf.
+    - added mounting holes
+
+A2 - June, 2022
+    - added ECO01
+
+
+ECOs
+----
+
+ECO01 - June, 2022
+    - add 10 kOhm pullup resistor between J5:15 (+3.3V) and J5:20 (DIRB) 
+    - add 10 kOhm pullup resistor between J5:15 (+3.3V) and J5:21 (OEA) 
+    
